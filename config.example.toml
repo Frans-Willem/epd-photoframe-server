@@ -1,0 +1,31 @@
+[[screens]]
+name = "living-room"
+width = 800
+height = 480
+
+[screens.immich]
+url = "https://immich.example.com"
+api_key = "your-api-key-here"
+
+[screens.dither]
+noise = "ign"                   # none | bayer | bayer:N | ign | white
+strategy = "octahedron-closest" # octahedron-closest | octahedron-furthest | naive-mix | naive-dominant
+diffuse = "floyd-steinberg"     # none | floyd-steinberg | jarvis-judice-and-ninke | atkinson | sierra
+dither_palette = "spectra6"     # naive | spectra6 | epdoptimize
+output_palette = "spectra6"
+
+[[screens]]
+name = "bedroom"
+width = 600
+height = 448
+
+[screens.immich]
+url = "https://immich.example.com"
+api_key = "your-api-key-here"
+
+[screens.dither]
+noise = "bayer:4"
+strategy = "octahedron-furthest"
+diffuse = "atkinson"
+dither_palette = "epdoptimize"
+output_palette = "spectra6"

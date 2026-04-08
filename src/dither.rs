@@ -1,0 +1,256 @@
+use epd_dither::decompose::naive::{NaiveDecomposer, NaiveDecomposerStrategy};
+use epd_dither::decompose::octahedron::{OctahedronDecomposer, OctahedronDecomposerAxisStrategy};
+use image::{DynamicImage, ImageBuffer, Rgb};
+use nalgebra::{DVector, geometry::Point3};
+use rand::distr::StandardUniform;
+use rand::prelude::*;
+
+use crate::config::{DitherConfig, NoiseSource, Strategy};
+
+fn color_to_point(color: Rgb<f32>) -> Point3<f32> {
+    let [r, g, b] = color.0;
+    Point3::new(r, g, b)
+}
+
+fn owned_to_dynamic_vector<T: nalgebra::Scalar, const N: usize>(
+    vec: nalgebra::SVector<T, N>,
+) -> DVector<T> {
+    DVector::from_column_slice(vec.as_slice())
+}
+
+// --- ImageSize / ImageReader / ImageWriter impls ---
+
+struct DitherBuffer<F: Fn(usize, usize) -> Option<f32>> {
+    image: ImageBuffer<Rgb<f32>, Vec<f32>>,
+    noise_fn: F,
+    target: Vec<usize>,
+}
+
+impl<F: Fn(usize, usize) -> Option<f32>> epd_dither::dither::diffuse::ImageSize
+    for DitherBuffer<F>
+{
+    fn width(&self) -> usize {
+        self.image.width() as usize
+    }
+    fn height(&self) -> usize {
+        self.image.height() as usize
+    }
+}
+
+impl<F: Fn(usize, usize) -> Option<f32>>
+    epd_dither::dither::diffuse::ImageReader<(Rgb<f32>, Option<f32>)> for DitherBuffer<F>
+{
+    fn get_pixel(&self, x: usize, y: usize) -> (Rgb<f32>, Option<f32>) {
+        (
+            *self.image.get_pixel(x as u32, y as u32),
+            (self.noise_fn)(x, y),
+        )
+    }
+}
+
+impl<F: Fn(usize, usize) -> Option<f32>> epd_dither::dither::diffuse::ImageWriter<usize>
+    for DitherBuffer<F>
+{
+    fn put_pixel(&mut self, x: usize, y: usize, pixel: usize) {
+        let w = self.image.width() as usize;
+        let h = self.image.height() as usize;
+        self.target.resize(w * h, 0);
+        self.target[y * w + x] = pixel;
+    }
+}
+
+// --- PixelStrategy ---
+
+struct DecomposingDitherStrategy {
+    decompose_fn: Box<dyn Fn(Point3<f32>) -> DVector<f32>>,
+}
+
+#[derive(Clone)]
+struct DecomposedQuantizationError(Option<DVector<f32>>);
+
+impl Default for DecomposedQuantizationError {
+    fn default() -> Self {
+        Self(None)
+    }
+}
+
+impl core::ops::Mul<usize> for DecomposedQuantizationError {
+    type Output = Self;
+    fn mul(self, rhs: usize) -> Self {
+        Self(self.0.map(|x| x * (rhs as f32)))
+    }
+}
+
+impl core::ops::Div<usize> for DecomposedQuantizationError {
+    type Output = Self;
+    fn div(self, rhs: usize) -> Self {
+        Self(self.0.map(|x| x / (rhs as f32)))
+    }
+}
+
+impl core::ops::AddAssign for DecomposedQuantizationError {
+    fn add_assign(&mut self, rhs: Self) {
+        self.0 = match (core::mem::take(&mut self.0), rhs.0) {
+            (a, None) => a,
+            (None, b) => b,
+            (Some(a), Some(b)) => Some(a + b),
+        };
+    }
+}
+
+impl epd_dither::dither::diffuse::PixelStrategy for DecomposingDitherStrategy {
+    type Source = (Rgb<f32>, Option<f32>);
+    type Target = usize;
+    type QuantizationError = DecomposedQuantizationError;
+
+    fn quantize(
+        &self,
+        source: Self::Source,
+        error: Self::QuantizationError,
+    ) -> (Self::Target, Self::QuantizationError) {
+        let (source, noise) = source;
+        let decomposed = (self.decompose_fn)(color_to_point(source));
+        let decomposed = match error.0 {
+            None => decomposed,
+            Some(e) => decomposed + e,
+        };
+        let clipped = decomposed.map(|x| x.max(0.0));
+        let clipped_sum = clipped.sum();
+
+        let index = if let Some(noise) = noise
+            && clipped_sum > 0.0
+        {
+            let mut noise = noise * clipped_sum;
+            let mut i = 0;
+            while i + 1 < clipped.nrows() && noise >= clipped[i] {
+                noise -= clipped[i];
+                i += 1;
+            }
+            i
+        } else {
+            decomposed.argmax().0
+        };
+
+        let mut err = decomposed;
+        err[index] -= 1.0;
+        (index, DecomposedQuantizationError(Some(err)))
+    }
+}
+
+// --- Public entry point ---
+
+/// Resize `img` to `(width, height)`, dither it, and return an indexed PNG.
+pub fn process(
+    img: DynamicImage,
+    width: u32,
+    height: u32,
+    config: &DitherConfig,
+) -> anyhow::Result<Vec<u8>> {
+    // Resize with cover crop: scale so the image fills the target, then center-crop.
+    let resized = cover_crop(img, width, height);
+    let input = resized.into_rgb32f();
+
+    let dither_palette_f32: Vec<Rgb<f32>> = config
+        .dither_palette
+        .colors()
+        .iter()
+        .map(|c| Rgb(c.0.map(|x| x as f32 / 255.0)))
+        .collect();
+    let palette_points: Vec<Point3<f32>> =
+        dither_palette_f32.iter().copied().map(color_to_point).collect();
+
+    let decompose: Box<dyn Fn(Point3<f32>) -> DVector<f32>> = match config.strategy {
+        Strategy::OctahedronClosest => {
+            let d = OctahedronDecomposer::new(&palette_points)
+                .ok_or_else(|| anyhow::anyhow!("failed to build OctahedronDecomposer"))?;
+            Box::new(move |x| {
+                owned_to_dynamic_vector(d.decompose(&x, OctahedronDecomposerAxisStrategy::Closest))
+            })
+        }
+        Strategy::OctahedronFurthest => {
+            let d = OctahedronDecomposer::new(&palette_points)
+                .ok_or_else(|| anyhow::anyhow!("failed to build OctahedronDecomposer"))?;
+            Box::new(move |x| {
+                owned_to_dynamic_vector(
+                    d.decompose(&x, OctahedronDecomposerAxisStrategy::Furthest),
+                )
+            })
+        }
+        Strategy::NaiveMix => {
+            let d = NaiveDecomposer::new(&palette_points)
+                .ok_or_else(|| anyhow::anyhow!("failed to build NaiveDecomposer"))?;
+            Box::new(move |x| d.decompose(&x, NaiveDecomposerStrategy::FavorMix))
+        }
+        Strategy::NaiveDominant => {
+            let d = NaiveDecomposer::new(&palette_points)
+                .ok_or_else(|| anyhow::anyhow!("failed to build NaiveDecomposer"))?;
+            Box::new(move |x| d.decompose(&x, NaiveDecomposerStrategy::FavorDominant))
+        }
+    };
+
+    let noise = config.noise.clone();
+    let noise_fn = move |x: usize, y: usize| -> Option<f32> {
+        match &noise {
+            NoiseSource::None => None,
+            NoiseSource::Bayer(Some(n)) => Some(epd_dither::noise::bayer(x, y, *n)),
+            NoiseSource::Bayer(None) => Some(epd_dither::noise::bayer_inf(x, y)),
+            NoiseSource::InterleavedGradient => {
+                Some(epd_dither::noise::interleaved_gradient_noise(x as f32, y as f32))
+            }
+            NoiseSource::White => Some(rand::rng().sample(StandardUniform)),
+        }
+    };
+
+    let mut buf = DitherBuffer {
+        image: input,
+        noise_fn,
+        target: Vec::new(),
+    };
+
+    epd_dither::dither::diffuse::diffuse_dither(
+        DecomposingDitherStrategy { decompose_fn: decompose },
+        config.diffuse.to_boxed_matrix(),
+        &mut buf,
+        true,
+    );
+
+    // Encode as indexed PNG
+    let mut png_bytes: Vec<u8> = Vec::new();
+    let mut encoder = png::Encoder::new(
+        std::io::BufWriter::new(&mut png_bytes),
+        buf.image.width(),
+        buf.image.height(),
+    );
+    encoder.set_color(png::ColorType::Indexed);
+    encoder.set_depth(png::BitDepth::Eight);
+    let palette_bytes: Vec<u8> = config
+        .output_palette
+        .colors()
+        .iter()
+        .flat_map(|rgb| rgb.0)
+        .collect();
+    encoder.set_palette(palette_bytes);
+    let data: Vec<u8> = buf.target.iter().map(|&i| i as u8).collect();
+    let mut writer = encoder.write_header()?;
+    writer.write_image_data(&data)?;
+    drop(writer);
+
+    Ok(png_bytes)
+}
+
+/// Scale the image to cover the target dimensions, then center-crop to exact size.
+fn cover_crop(img: DynamicImage, target_w: u32, target_h: u32) -> DynamicImage {
+    let (src_w, src_h) = (img.width(), img.height());
+    let scale = f64::max(
+        target_w as f64 / src_w as f64,
+        target_h as f64 / src_h as f64,
+    );
+    let scaled_w = (src_w as f64 * scale).ceil() as u32;
+    let scaled_h = (src_h as f64 * scale).ceil() as u32;
+
+    let resized = img.resize_exact(scaled_w, scaled_h, image::imageops::FilterType::Lanczos3);
+
+    let x = (scaled_w.saturating_sub(target_w)) / 2;
+    let y = (scaled_h.saturating_sub(target_h)) / 2;
+    resized.crop_imm(x, y, target_w, target_h)
+}
