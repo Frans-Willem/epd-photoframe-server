@@ -1,6 +1,6 @@
+mod album;
 mod config;
 mod dither;
-mod immich;
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -13,12 +13,12 @@ use axum::{
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+use album::AlbumClient;
 use config::{Config, ScreenConfig};
-use immich::ImmichClient;
 
 #[derive(Clone)]
 struct AppState {
-    screens: Arc<HashMap<String, (ScreenConfig, ImmichClient)>>,
+    screens: Arc<HashMap<String, (ScreenConfig, AlbumClient)>>,
 }
 
 #[tokio::main]
@@ -35,14 +35,14 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::from_file(&config_path)?;
     tracing::info!(path = %config_path, screens = config.screens.len(), "loaded config");
 
-    let screens: HashMap<String, (ScreenConfig, ImmichClient)> = config
+    let screens: HashMap<String, (ScreenConfig, AlbumClient)> = config
         .screens
         .into_iter()
         .map(|s| {
-            let client = ImmichClient::new(s.immich.url.clone(), s.immich.api_key.clone());
-            (s.name.clone(), (s, client))
+            let client = AlbumClient::new(s.share_url.clone())?;
+            Ok::<_, anyhow::Error>((s.name.clone(), (s, client)))
         })
-        .collect();
+        .collect::<anyhow::Result<_>>()?;
 
     let state = AppState { screens: Arc::new(screens) };
 
@@ -67,7 +67,7 @@ async fn screen_handler(
         .ok_or_else(|| AppError::NotFound(format!("screen `{name}` not found")))?;
 
     tracing::info!(screen = %name, "fetching image");
-    let image_bytes = client.random_image_bytes().await?;
+    let image_bytes = client.random_image_bytes(screen.width, screen.height).await?;
 
     let img = image::load_from_memory(&image_bytes)
         .map_err(|e| anyhow::anyhow!("failed to decode image: {e}"))?;

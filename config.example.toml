@@ -2,10 +2,9 @@
 name = "living-room"
 width = 800
 height = 480
-
-[screens.immich]
-url = "https://immich.example.com"
-api_key = "your-api-key-here"
+# Create a public shared album in Google Photos, copy the share link here.
+# Both photos.app.goo.gl short links and photos.google.com/share/... links work.
+share_url = "https://photos.app.goo.gl/YOUR_SHARE_ID"
 
 [screens.dither]
 noise = "ign"                   # none | bayer | bayer:N | ign | white
@@ -18,10 +17,7 @@ output_palette = "spectra6"
 name = "bedroom"
 width = 600
 height = 448
-
-[screens.immich]
-url = "https://immich.example.com"
-api_key = "your-api-key-here"
+share_url = "https://photos.app.goo.gl/ANOTHER_SHARE_ID"
 
 [screens.dither]
 noise = "bayer:4"

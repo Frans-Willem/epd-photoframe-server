@@ -11,15 +11,11 @@ pub struct ScreenConfig {
     pub name: String,
     pub width: u32,
     pub height: u32,
-    pub immich: ImmichConfig,
+    /// Public Google Photos album share URL (e.g. `https://photos.app.goo.gl/...`
+    /// or `https://photos.google.com/share/...`).
+    pub share_url: String,
     #[serde(default)]
     pub dither: DitherConfig,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ImmichConfig {
-    pub url: String,
-    pub api_key: String,
 }
 
 #[derive(Debug, Clone)]
