@@ -67,19 +67,14 @@ async fn screen_handler(
         .ok_or_else(|| AppError::NotFound(format!("screen `{name}` not found")))?;
 
     tracing::info!(screen = %name, "fetching image");
-    let image_bytes = client.random_image_bytes(screen.width, screen.height).await?;
+    let img = client.random_frame(screen.width, screen.height, &screen.fit).await?;
 
-    let img = image::load_from_memory(&image_bytes)
-        .map_err(|e| anyhow::anyhow!("failed to decode image: {e}"))?;
-
-    let png =
-        tokio::task::spawn_blocking({
-            let dither_cfg = screen.dither.clone();
-            let (w, h) = (screen.width, screen.height);
-            move || dither::process(img, w, h, &dither_cfg)
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("dither task panicked: {e}"))??;
+    let png = tokio::task::spawn_blocking({
+        let dither_cfg = screen.dither.clone();
+        move || dither::process(img, &dither_cfg)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("dither task panicked: {e}"))??;
 
     let mut response = png.into_response();
     response

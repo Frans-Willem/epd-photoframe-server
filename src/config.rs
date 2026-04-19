@@ -15,7 +15,26 @@ pub struct ScreenConfig {
     /// or `https://photos.google.com/share/...`).
     pub share_url: String,
     #[serde(default)]
+    pub fit: FitMode,
+    #[serde(default)]
     pub dither: DitherConfig,
+}
+
+/// How to reconcile a photo's aspect ratio with the screen's aspect ratio.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FitMode {
+    /// Center-crop to exact screen size (Google-side, `-c`).
+    #[default]
+    Crop,
+    /// Content-aware crop to exact screen size (Google-side, `-p`).
+    SmartCrop,
+    /// Fit within screen, pad shorter axis with black bars.
+    LetterboxBlack,
+    /// Fit within screen, pad shorter axis with white bars.
+    LetterboxWhite,
+    /// Fit within screen, fill background with a blurred cover-sized copy of the photo.
+    BlurFill,
 }
 
 #[derive(Debug, Clone)]

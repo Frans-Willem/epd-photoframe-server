@@ -139,16 +139,9 @@ impl epd_dither::dither::diffuse::PixelStrategy for DecomposingDitherStrategy {
 
 // --- Public entry point ---
 
-/// Resize `img` to `(width, height)`, dither it, and return an indexed PNG.
-pub fn process(
-    img: DynamicImage,
-    width: u32,
-    height: u32,
-    config: &DitherConfig,
-) -> anyhow::Result<Vec<u8>> {
-    // Resize with cover crop: scale so the image fills the target, then center-crop.
-    let resized = cover_crop(img, width, height);
-    let input = resized.into_rgb32f();
+/// Dither `img` and return an indexed PNG at the image's own dimensions.
+pub fn process(img: DynamicImage, config: &DitherConfig) -> anyhow::Result<Vec<u8>> {
+    let input = img.into_rgb32f();
 
     let dither_palette_f32: Vec<Rgb<f32>> = config
         .dither_palette
@@ -236,21 +229,4 @@ pub fn process(
     drop(writer);
 
     Ok(png_bytes)
-}
-
-/// Scale the image to cover the target dimensions, then center-crop to exact size.
-fn cover_crop(img: DynamicImage, target_w: u32, target_h: u32) -> DynamicImage {
-    let (src_w, src_h) = (img.width(), img.height());
-    let scale = f64::max(
-        target_w as f64 / src_w as f64,
-        target_h as f64 / src_h as f64,
-    );
-    let scaled_w = (src_w as f64 * scale).ceil() as u32;
-    let scaled_h = (src_h as f64 * scale).ceil() as u32;
-
-    let resized = img.resize_exact(scaled_w, scaled_h, image::imageops::FilterType::Lanczos3);
-
-    let x = (scaled_w.saturating_sub(target_w)) / 2;
-    let y = (scaled_h.saturating_sub(target_h)) / 2;
-    resized.crop_imm(x, y, target_w, target_h)
 }

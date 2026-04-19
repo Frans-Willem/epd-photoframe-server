@@ -3,9 +3,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
+use image::{DynamicImage, Rgb, RgbImage, imageops};
 use rand::Rng as _;
 use reqwest::Client;
 use tokio::sync::Mutex;
+
+use crate::config::FitMode;
 
 const CACHE_TTL: Duration = Duration::from_secs(3600);
 const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
@@ -37,13 +40,18 @@ impl AlbumClient {
         })
     }
 
-    pub async fn random_image_bytes(&self, width: u32, height: u32) -> anyhow::Result<Vec<u8>> {
+    /// Returns a `width × height` image ready to dither.
+    pub async fn random_frame(
+        &self,
+        width: u32,
+        height: u32,
+        fit: &FitMode,
+    ) -> anyhow::Result<DynamicImage> {
         let urls = self.photo_urls().await?;
         anyhow::ensure!(!urls.is_empty(), "album returned no photos");
 
         let base = &urls[rand::rng().random_range(0..urls.len())];
-        let max_dim = width.max(height) * 2;
-        let sized = format!("{base}=w{max_dim}");
+        let sized = format!("{base}{}", size_suffix(width, height, fit));
 
         tracing::debug!(url = %sized, "downloading photo");
         let bytes = self
@@ -58,7 +66,8 @@ impl AlbumClient {
             .await
             .context("reading photo bytes")?;
 
-        Ok(bytes.to_vec())
+        let img = image::load_from_memory(&bytes).context("decoding image")?;
+        Ok(apply_fit(img, width, height, fit))
     }
 
     async fn photo_urls(&self) -> anyhow::Result<Vec<String>> {
@@ -116,6 +125,46 @@ fn extract_photo_urls(html: &str) -> Vec<String> {
     out
 }
 
+fn size_suffix(width: u32, height: u32, fit: &FitMode) -> String {
+    let modifier = match fit {
+        FitMode::Crop => "-c",
+        FitMode::SmartCrop => "-p",
+        FitMode::LetterboxBlack | FitMode::LetterboxWhite | FitMode::BlurFill => "",
+    };
+    format!("=w{width}-h{height}{modifier}")
+}
+
+fn apply_fit(img: DynamicImage, width: u32, height: u32, fit: &FitMode) -> DynamicImage {
+    match fit {
+        // Google already returned exact size for these.
+        FitMode::Crop | FitMode::SmartCrop => img,
+        FitMode::LetterboxBlack => pad(img, width, height, Rgb([0, 0, 0])),
+        FitMode::LetterboxWhite => pad(img, width, height, Rgb([255, 255, 255])),
+        FitMode::BlurFill => blur_fill(img, width, height),
+    }
+}
+
+fn pad(img: DynamicImage, width: u32, height: u32, fill: Rgb<u8>) -> DynamicImage {
+    let fg = img.to_rgb8();
+    let mut bg = RgbImage::from_pixel(width, height, fill);
+    let x = (width.saturating_sub(fg.width())) as i64 / 2;
+    let y = (height.saturating_sub(fg.height())) as i64 / 2;
+    imageops::overlay(&mut bg, &fg, x, y);
+    DynamicImage::ImageRgb8(bg)
+}
+
+fn blur_fill(img: DynamicImage, width: u32, height: u32) -> DynamicImage {
+    // Cover-crop to target dims at low fidelity — a Gaussian blur will hide the resampling.
+    let cover = img.resize_to_fill(width, height, imageops::FilterType::Triangle);
+    let mut bg = imageops::blur(&cover.to_rgb8(), 24.0);
+
+    let fg = img.to_rgb8();
+    let x = (width.saturating_sub(fg.width())) as i64 / 2;
+    let y = (height.saturating_sub(fg.height())) as i64 / 2;
+    imageops::overlay(&mut bg, &fg, x, y);
+    DynamicImage::ImageRgb8(bg)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,5 +185,25 @@ mod tests {
                 "https://lh3.googleusercontent.com/pw/DEF456".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn size_suffixes() {
+        assert_eq!(size_suffix(1200, 1600, &FitMode::Crop), "=w1200-h1600-c");
+        assert_eq!(size_suffix(1200, 1600, &FitMode::SmartCrop), "=w1200-h1600-p");
+        assert_eq!(size_suffix(1200, 1600, &FitMode::LetterboxBlack), "=w1200-h1600");
+        assert_eq!(size_suffix(1200, 1600, &FitMode::LetterboxWhite), "=w1200-h1600");
+        assert_eq!(size_suffix(1200, 1600, &FitMode::BlurFill), "=w1200-h1600");
+    }
+
+    #[test]
+    fn pad_centres_smaller_image() {
+        let src = DynamicImage::ImageRgb8(RgbImage::from_pixel(100, 80, Rgb([128, 0, 0])));
+        let out = pad(src, 200, 200, Rgb([0, 0, 0])).to_rgb8();
+        assert_eq!(out.dimensions(), (200, 200));
+        // A pixel at the centre of the pasted region should be red.
+        assert_eq!(out.get_pixel(100, 100), &Rgb([128, 0, 0]));
+        // A corner should be the fill.
+        assert_eq!(out.get_pixel(0, 0), &Rgb([0, 0, 0]));
     }
 }
