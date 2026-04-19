@@ -14,27 +14,74 @@ pub struct ScreenConfig {
     /// Public Google Photos album share URL (e.g. `https://photos.app.goo.gl/...`
     /// or `https://photos.google.com/share/...`).
     pub share_url: String,
+    /// How Google should resize the image to fit the screen.
     #[serde(default)]
-    pub fit: FitMode,
+    pub fit: FitMethod,
+    /// What to put around the image if the returned image is smaller than the screen
+    /// on either axis.
+    #[serde(default)]
+    pub background: BackgroundMethod,
     #[serde(default)]
     pub dither: DitherConfig,
 }
 
-/// How to reconcile a photo's aspect ratio with the screen's aspect ratio.
+/// Server-side resize strategy — controls the Google URL suffix.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum FitMode {
-    /// Center-crop to exact screen size (Google-side, `-c`).
+pub enum FitMethod {
+    /// Centre-crop to requested size (`-c`).
     #[default]
     Crop,
-    /// Content-aware crop to exact screen size (Google-side, `-p`).
+    /// Content-aware crop to requested size (`-p`).
     SmartCrop,
-    /// Fit within screen, pad shorter axis with black bars.
-    LetterboxBlack,
-    /// Fit within screen, pad shorter axis with white bars.
-    LetterboxWhite,
-    /// Fit within screen, fill background with a blurred cover-sized copy of the photo.
-    BlurFill,
+    /// Stretch to requested size, ignoring aspect ratio (`-s`).
+    Resize,
+    /// Fit within requested size, preserving aspect ratio (no suffix).
+    Contain,
+}
+
+/// Local padding strategy when the returned image is smaller than the screen.
+#[derive(Debug, Clone)]
+pub enum BackgroundMethod {
+    /// Pad with a solid colour.
+    Solid(image::Rgb<u8>),
+    /// Pad with a blurred cover-sized copy of the photo.
+    Blur,
+}
+
+impl Default for BackgroundMethod {
+    fn default() -> Self {
+        Self::Solid(image::Rgb([255, 255, 255]))
+    }
+}
+
+impl FromStr for BackgroundMethod {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s == "blur" {
+            return Ok(Self::Blur);
+        }
+        if let Some(hex) = s.strip_prefix('#')
+            && hex.len() == 6
+        {
+            let r = u8::from_str_radix(&hex[0..2], 16)
+                .map_err(|_| format!("invalid hex colour `{s}`"))?;
+            let g = u8::from_str_radix(&hex[2..4], 16)
+                .map_err(|_| format!("invalid hex colour `{s}`"))?;
+            let b = u8::from_str_radix(&hex[4..6], 16)
+                .map_err(|_| format!("invalid hex colour `{s}`"))?;
+            return Ok(Self::Solid(image::Rgb([r, g, b])));
+        }
+        Err(format!("expected `blur` or `#RRGGBB`, got `{s}`"))
+    }
+}
+
+impl<'de> Deserialize<'de> for BackgroundMethod {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -1,4 +1,5 @@
 mod album;
+mod background;
 mod config;
 mod dither;
 
@@ -68,6 +69,7 @@ async fn screen_handler(
 
     tracing::info!(screen = %name, "fetching image");
     let img = client.random_frame(screen.width, screen.height, &screen.fit).await?;
+    let img = background::apply(img, screen.width, screen.height, &screen.background)?;
 
     let png = tokio::task::spawn_blocking({
         let dither_cfg = screen.dither.clone();

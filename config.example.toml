@@ -5,13 +5,17 @@ height = 480
 # Create a public shared album in Google Photos, copy the share link here.
 # Both photos.app.goo.gl short links and photos.google.com/share/... links work.
 share_url = "https://photos.app.goo.gl/YOUR_SHARE_ID"
-# How to reconcile photo aspect ratio with screen aspect ratio.
-# crop             — centre-crop (Google-side) to exactly width × height
-# smart-crop       — content-aware crop (Google-side)
-# letterbox-black  — fit inside the screen, pad with black bars
-# letterbox-white  — fit inside the screen, pad with white bars
-# blur-fill        — fit inside the screen, fill with a blurred cover of the photo
+# How Google should resize the photo to fit the screen.
+#   crop        — centre-crop to width × height
+#   smart-crop  — content-aware crop to width × height
+#   resize      — stretch to width × height, ignoring aspect ratio
+#   contain     — fit within width × height, preserving aspect ratio
 fit = "crop"
+# What fills the area around the photo if the returned image ends up smaller
+# than the screen (mainly used with `contain`).
+#   "blur"     — a blurred cover-sized copy of the photo
+#   "#RRGGBB"  — a solid HTML colour (default: "#FFFFFF")
+background = "#FFFFFF"
 
 [screens.dither]
 noise = "ign"                   # none | bayer | bayer:N | ign | white
@@ -25,7 +29,8 @@ name = "bedroom"
 width = 600
 height = 448
 share_url = "https://photos.app.goo.gl/ANOTHER_SHARE_ID"
-fit = "blur-fill"
+fit = "contain"
+background = "blur"
 
 [screens.dither]
 noise = "bayer:4"
