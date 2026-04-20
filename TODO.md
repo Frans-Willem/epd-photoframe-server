@@ -1,26 +1,5 @@
 # TODO
 
-## Daily info overlay (date + day + weather, bottom-left)
-
-Render the overlay after `fit` + `background` but before dither, so the text
-participates in the output palette.
-
-- Font: `ab_glyph` + bundled TTF (e.g. DejaVu Sans). `font8x8` is too crude at
-  1200×1600.
-- Weather: [Open-Meteo](https://open-meteo.com) — free, no API key, JSON over
-  HTTPS. Config block with `latitude` / `longitude` / units. Cache response
-  for ~1h.
-- Backdrop: start with a solid white card under the text. Semi-transparent
-  scrim and no-backdrop options are worse bets on e-ink (contrast over mixed
-  photos is unreliable).
-- New deps: `ab_glyph` + a TTF asset; second HTTP call for weather (reuse the
-  existing `reqwest::Client` in the album client or give it its own).
-
-Date/time source: use the JSON blob timestamp from the album share page
-(position `[2]` in each photo entry, UTC millis). Also available via EXIF
-`DateTimeOriginal` but that's local-time-without-TZ. JSON is cheaper and
-already being scraped.
-
 ## Navigation + caching (prev / next, scheduled rotate)
 
 No history buffer, no persistence. State per screen lives in memory only —
