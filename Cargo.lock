@@ -410,7 +410,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "epd-frame-server"
+name = "epd-photoframe-server"
 version = "0.1.0"
 dependencies = [
  "ab_glyph",
