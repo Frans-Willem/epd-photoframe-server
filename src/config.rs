@@ -1,6 +1,9 @@
 use serde::Deserialize;
 use std::str::FromStr;
 
+use crate::color::Color;
+use crate::infobox::InfoboxConfig;
+
 #[derive(Debug, Deserialize)]
 pub struct Config {
     pub screens: Vec<ScreenConfig>,
@@ -21,6 +24,9 @@ pub struct ScreenConfig {
     /// on either axis.
     #[serde(default)]
     pub background: BackgroundMethod,
+    /// Optional overlay showing day/date/weather.
+    #[serde(default)]
+    pub infobox: Option<InfoboxConfig>,
     #[serde(default)]
     pub dither: DitherConfig,
 }
@@ -43,15 +49,15 @@ pub enum FitMethod {
 /// Local padding strategy when the returned image is smaller than the screen.
 #[derive(Debug, Clone)]
 pub enum BackgroundMethod {
-    /// Pad with a solid colour.
-    Solid(image::Rgb<u8>),
+    /// Pad with a solid colour. Alpha is ignored.
+    Solid(Color),
     /// Pad with a blurred cover-sized copy of the photo.
     Blur,
 }
 
 impl Default for BackgroundMethod {
     fn default() -> Self {
-        Self::Solid(image::Rgb([255, 255, 255]))
+        Self::Solid(Color::rgb(255, 255, 255))
     }
 }
 
@@ -62,18 +68,7 @@ impl FromStr for BackgroundMethod {
         if s == "blur" {
             return Ok(Self::Blur);
         }
-        if let Some(hex) = s.strip_prefix('#')
-            && hex.len() == 6
-        {
-            let r = u8::from_str_radix(&hex[0..2], 16)
-                .map_err(|_| format!("invalid hex colour `{s}`"))?;
-            let g = u8::from_str_radix(&hex[2..4], 16)
-                .map_err(|_| format!("invalid hex colour `{s}`"))?;
-            let b = u8::from_str_radix(&hex[4..6], 16)
-                .map_err(|_| format!("invalid hex colour `{s}`"))?;
-            return Ok(Self::Solid(image::Rgb([r, g, b])));
-        }
-        Err(format!("expected `blur` or `#RRGGBB`, got `{s}`"))
+        Color::from_str(s).map(Self::Solid)
     }
 }
 
@@ -84,18 +79,13 @@ impl<'de> Deserialize<'de> for BackgroundMethod {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum NoiseSource {
     None,
     Bayer(Option<usize>),
+    #[default]
     InterleavedGradient,
     White,
-}
-
-impl Default for NoiseSource {
-    fn default() -> Self {
-        Self::InterleavedGradient
-    }
 }
 
 impl FromStr for NoiseSource {

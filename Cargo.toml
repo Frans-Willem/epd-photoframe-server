@@ -20,3 +20,7 @@ epd-dither = { git = "https://github.com/Frans-Willem/epd-dither", default-featu
 nalgebra = { version = "0.34", default-features = false, features = ["std"] }
 png = "0.18"
 rand = "0.9"
+ab_glyph = "0.2"
+chrono = "0.4"
+chrono-tz = "0.10"
+iana-time-zone = "0.1"

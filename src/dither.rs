@@ -65,14 +65,8 @@ struct DecomposingDitherStrategy {
     decompose_fn: Box<dyn Fn(Point3<f32>) -> DVector<f32>>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct DecomposedQuantizationError(Option<DVector<f32>>);
-
-impl Default for DecomposedQuantizationError {
-    fn default() -> Self {
-        Self(None)
-    }
-}
 
 impl core::ops::Mul<usize> for DecomposedQuantizationError {
     type Output = Self;

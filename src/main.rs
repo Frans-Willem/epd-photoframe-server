@@ -1,7 +1,10 @@
 mod album;
 mod background;
+mod color;
 mod config;
 mod dither;
+mod infobox;
+mod weather;
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -12,6 +15,7 @@ use axum::{
     routing::get,
     Router,
 };
+use reqwest::Client;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use album::AlbumClient;
@@ -20,6 +24,7 @@ use config::{Config, ScreenConfig};
 #[derive(Clone)]
 struct AppState {
     screens: Arc<HashMap<String, (ScreenConfig, AlbumClient)>>,
+    http: Client,
 }
 
 #[tokio::main]
@@ -45,7 +50,10 @@ async fn main() -> anyhow::Result<()> {
         })
         .collect::<anyhow::Result<_>>()?;
 
-    let state = AppState { screens: Arc::new(screens) };
+    let state = AppState {
+        screens: Arc::new(screens),
+        http: Client::builder().build()?,
+    };
 
     let app = Router::new()
         .route("/screen/{name}", get(screen_handler))
@@ -70,6 +78,14 @@ async fn screen_handler(
     tracing::info!(screen = %name, "fetching image");
     let img = client.random_frame(screen.width, screen.height, &screen.fit).await?;
     let img = background::apply(img, screen.width, screen.height, &screen.background)?;
+
+    let img = if let Some(infobox_cfg) = &screen.infobox {
+        let mut rgb = img.to_rgb8();
+        infobox::apply(&mut rgb, infobox_cfg, &state.http).await?;
+        image::DynamicImage::ImageRgb8(rgb)
+    } else {
+        img
+    };
 
     let png = tokio::task::spawn_blocking({
         let dither_cfg = screen.dither.clone();

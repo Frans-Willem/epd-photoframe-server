@@ -1,4 +1,4 @@
-use image::{DynamicImage, RgbImage, imageops};
+use image::{DynamicImage, Rgb, RgbImage, imageops};
 
 use crate::config::BackgroundMethod;
 
@@ -19,12 +19,12 @@ pub fn apply(
         return Ok(img);
     }
     Ok(match method {
-        BackgroundMethod::Solid(colour) => pad(&img, width, height, *colour),
+        BackgroundMethod::Solid(colour) => pad(&img, width, height, colour.to_rgb()),
         BackgroundMethod::Blur => blur(&img, width, height),
     })
 }
 
-fn pad(img: &DynamicImage, width: u32, height: u32, colour: image::Rgb<u8>) -> DynamicImage {
+fn pad(img: &DynamicImage, width: u32, height: u32, colour: Rgb<u8>) -> DynamicImage {
     let fg = img.to_rgb8();
     let mut bg = RgbImage::from_pixel(width, height, colour);
     imageops::overlay(&mut bg, &fg, offset_x(&fg, width), offset_y(&fg, height));
@@ -52,12 +52,12 @@ fn offset_y(fg: &RgbImage, height: u32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::Rgb;
+    use crate::color::Color;
 
     #[test]
     fn exact_size_passes_through() {
         let src = DynamicImage::ImageRgb8(RgbImage::from_pixel(200, 200, Rgb([10, 20, 30])));
-        let out = apply(src, 200, 200, &BackgroundMethod::Solid(Rgb([0, 0, 0]))).unwrap();
+        let out = apply(src, 200, 200, &BackgroundMethod::Solid(Color::rgb(0, 0, 0))).unwrap();
         assert_eq!((out.width(), out.height()), (200, 200));
         assert_eq!(out.to_rgb8().get_pixel(0, 0), &Rgb([10, 20, 30]));
     }
@@ -65,18 +65,27 @@ mod tests {
     #[test]
     fn oversized_errors() {
         let src = DynamicImage::ImageRgb8(RgbImage::from_pixel(300, 200, Rgb([0, 0, 0])));
-        let err = apply(src, 200, 200, &BackgroundMethod::Solid(Rgb([0, 0, 0]))).unwrap_err();
+        let err = apply(src, 200, 200, &BackgroundMethod::Solid(Color::rgb(0, 0, 0))).unwrap_err();
         assert!(err.to_string().contains("larger than requested"));
     }
 
     #[test]
     fn solid_centres_smaller_image() {
         let src = DynamicImage::ImageRgb8(RgbImage::from_pixel(100, 80, Rgb([128, 0, 0])));
-        let out = apply(src, 200, 200, &BackgroundMethod::Solid(Rgb([0, 255, 0])))
+        let out = apply(src, 200, 200, &BackgroundMethod::Solid(Color::rgb(0, 255, 0)))
             .unwrap()
             .to_rgb8();
         assert_eq!((out.width(), out.height()), (200, 200));
         assert_eq!(out.get_pixel(100, 100), &Rgb([128, 0, 0]));
         assert_eq!(out.get_pixel(0, 0), &Rgb([0, 255, 0]));
+    }
+
+    #[test]
+    fn solid_ignores_alpha() {
+        let src = DynamicImage::ImageRgb8(RgbImage::from_pixel(100, 80, Rgb([0, 0, 0])));
+        let out = apply(src, 200, 200, &BackgroundMethod::Solid(Color::rgba(10, 20, 30, 0)))
+            .unwrap()
+            .to_rgb8();
+        assert_eq!(out.get_pixel(0, 0), &Rgb([10, 20, 30]));
     }
 }

@@ -13,9 +13,21 @@ share_url = "https://photos.app.goo.gl/YOUR_SHARE_ID"
 fit = "crop"
 # What fills the area around the photo if the returned image ends up smaller
 # than the screen (mainly used with `contain`).
-#   "blur"     — a blurred cover-sized copy of the photo
-#   "#RRGGBB"  — a solid HTML colour (default: "#FFFFFF")
+#   "blur"            — a blurred cover-sized copy of the photo
+#   "#RRGGBB"         — a solid HTML colour (default: "#FFFFFF")
+#   "rgb(r,g,b)"      — a solid colour, 0-255 components
+#   "rgba(r,g,b,a)"   — same, with CSS float alpha (a in [0.0, 1.0]) — alpha ignored here
 background = "#FFFFFF"
+
+# Optional info overlay — day of week, date, weather.
+[screens.infobox]
+position = "bottom-left"       # top-left | top | top-right | left | right | bottom-left | bottom | bottom-right
+background = "rgba(255, 255, 255, 0.8)"
+foreground = "#000000"
+latitude = 52.37
+longitude = 4.90
+# timezone = "Europe/Amsterdam"  # optional — defaults to system timezone
+units = "metric"               # metric (°C, km/h) | imperial (°F, mph)
 
 [screens.dither]
 noise = "ign"                   # none | bayer | bayer:N | ign | white
