@@ -410,6 +410,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "epd-frame-server"
+version = "0.1.0"
+dependencies = [
+ "ab_glyph",
+ "anyhow",
+ "axum",
+ "chrono",
+ "chrono-tz",
+ "epd-dither",
+ "iana-time-zone",
+ "image",
+ "nalgebra",
+ "png",
+ "rand",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "equator"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1035,32 +1061,6 @@ name = "imgref"
 version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7c5cedc30da3a610cac6b4ba17597bdf7152cf974e8aab3afb3d54455e371c8"
-
-[[package]]
-name = "immich-ink-frame"
-version = "0.1.0"
-dependencies = [
- "ab_glyph",
- "anyhow",
- "axum",
- "chrono",
- "chrono-tz",
- "epd-dither",
- "iana-time-zone",
- "image",
- "nalgebra",
- "png",
- "rand",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "toml",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
-]
 
 [[package]]
 name = "indexmap"

@@ -1,5 +1,5 @@
 [package]
-name = "immich-ink-frame"
+name = "epd-frame-server"
 version = "0.1.0"
 edition = "2024"
 
