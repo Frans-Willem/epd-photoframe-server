@@ -27,6 +27,11 @@ pub struct ScreenConfig {
     /// Optional overlay showing day/date/weather.
     #[serde(default)]
     pub infobox: Option<InfoboxConfig>,
+    /// Daily time (local, `HH:MM` or `HH:MM:SS`) at which the screen reshuffles
+    /// and resets to the first photo of the new shuffle. If unset, the shuffle
+    /// persists until the process restarts.
+    #[serde(default)]
+    pub rotate_at: Option<String>,
     #[serde(default)]
     pub dither: DitherConfig,
 }

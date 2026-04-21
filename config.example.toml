@@ -18,6 +18,13 @@ fit = "crop"
 #   "rgb(r,g,b)"      — a solid colour, 0-255 components
 #   "rgba(r,g,b,a)"   — same, with CSS float alpha (a in [0.0, 1.0]) — alpha ignored here
 background = "#FFFFFF"
+# Optional daily reshuffle time (local, HH:MM or HH:MM:SS). When the current
+# time crosses this moment, the photo order is reshuffled with a new seed
+# and the cursor resets to the first photo. Omit to keep the shuffle until
+# the process restarts. Requests with ?action=next / ?action=previous step
+# the cursor within the current shuffle; ?action=refresh is a no-op; a plain
+# GET (e.g. power-on) just re-renders the current photo.
+rotate_at = "02:00"
 
 # Optional info overlay — day of week, date, weather.
 [screens.infobox]

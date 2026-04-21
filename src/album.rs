@@ -4,7 +4,6 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use image::DynamicImage;
-use rand::Rng as _;
 use reqwest::Client;
 use tokio::sync::Mutex;
 
@@ -40,22 +39,34 @@ impl AlbumClient {
         })
     }
 
-    /// Fetches a random photo from the album, resized by Google according to `fit`.
-    /// The returned image's dimensions are whatever Google returned — it is the
-    /// caller's job to reconcile them with the target screen size.
-    pub async fn random_frame(
+    /// Fetches one photo from the album, resized by Google according to `fit`.
+    /// The caller picks the index via `select`, which receives the current
+    /// album size and returns an index in `[0, n)`. The returned image's
+    /// dimensions are whatever Google returned — it is the caller's job to
+    /// reconcile them with the target screen size.
+    pub async fn pick<F>(
         &self,
         width: u32,
         height: u32,
         fit: &FitMethod,
-    ) -> anyhow::Result<DynamicImage> {
+        select: F,
+    ) -> anyhow::Result<DynamicImage>
+    where
+        F: FnOnce(usize) -> usize,
+    {
         let urls = self.photo_urls().await?;
         anyhow::ensure!(!urls.is_empty(), "album returned no photos");
+        let index = select(urls.len());
+        anyhow::ensure!(
+            index < urls.len(),
+            "selector returned out-of-range index {index}/{}",
+            urls.len()
+        );
 
-        let base = &urls[rand::rng().random_range(0..urls.len())];
+        let base = &urls[index];
         let sized = format!("{base}{}", size_suffix(width, height, fit));
 
-        tracing::debug!(url = %sized, "downloading photo");
+        tracing::debug!(url = %sized, index, of = urls.len(), "downloading photo");
         let bytes = self
             .client
             .get(&sized)
