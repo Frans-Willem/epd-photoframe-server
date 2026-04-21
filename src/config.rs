@@ -3,6 +3,7 @@ use std::str::FromStr;
 
 use crate::color::Color;
 use crate::infobox::InfoboxConfig;
+use crate::screen_state::Rotate;
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
@@ -27,11 +28,16 @@ pub struct ScreenConfig {
     /// Optional overlay showing day/date/weather.
     #[serde(default)]
     pub infobox: Option<InfoboxConfig>,
-    /// Daily time (local, `HH:MM` or `HH:MM:SS`) at which the screen reshuffles
-    /// and resets to the first photo of the new shuffle. If unset, the shuffle
-    /// persists until the process restarts.
+    /// When the screen should reshuffle (a new seed + cursor reset).
+    /// Either `{ cron = "<expr>" }` (Quartz-style 7-field cron) or
+    /// `{ natural = "<phrase>" }` (cron-lingo, e.g. "at 2 AM and 2 PM").
+    /// If unset, the shuffle persists until the process restarts.
     #[serde(default)]
-    pub rotate_at: Option<String>,
+    pub rotate: Option<Rotate>,
+    /// IANA timezone name (e.g. `Europe/Amsterdam`) used for rotation
+    /// scheduling and the infobox. Defaults to the system timezone.
+    #[serde(default)]
+    pub timezone: Option<String>,
     #[serde(default)]
     pub dither: DitherConfig,
 }
@@ -214,5 +220,23 @@ impl Config {
     pub fn from_file(path: &str) -> anyhow::Result<Self> {
         let contents = std::fs::read_to_string(path)?;
         Ok(toml::from_str(&contents)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::screen_state::Rotate;
+
+    #[test]
+    fn example_config_parses() {
+        let text = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config.example.toml"),
+        )
+        .unwrap();
+        let cfg: Config = toml::from_str(&text).expect("config.example.toml should parse");
+        assert_eq!(cfg.screens.len(), 2);
+        assert!(matches!(cfg.screens[0].rotate, Some(Rotate::Cron(_))));
+        assert!(matches!(cfg.screens[1].rotate, Some(Rotate::Natural(_))));
     }
 }

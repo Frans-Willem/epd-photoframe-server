@@ -18,13 +18,19 @@ fit = "crop"
 #   "rgb(r,g,b)"      — a solid colour, 0-255 components
 #   "rgba(r,g,b,a)"   — same, with CSS float alpha (a in [0.0, 1.0]) — alpha ignored here
 background = "#FFFFFF"
-# Optional daily reshuffle time (local, HH:MM or HH:MM:SS). When the current
-# time crosses this moment, the photo order is reshuffled with a new seed
-# and the cursor resets to the first photo. Omit to keep the shuffle until
-# the process restarts. Requests with ?action=next / ?action=previous step
-# the cursor within the current shuffle; ?action=refresh is a no-op; a plain
-# GET (e.g. power-on) just re-renders the current photo.
-rotate_at = "02:00"
+# IANA timezone name, used for rotation and the infobox clock. Defaults to
+# the system timezone.
+# timezone = "Europe/Amsterdam"
+# When the screen should reshuffle (new seed, cursor reset to the first
+# photo of the new shuffle). Pick ONE syntax — Quartz-style 7-field cron:
+#   sec min hour day-of-month month day-of-week [year]
+# or a cron-lingo natural-language phrase (see the bedroom screen below).
+# Omit the `rotate` key entirely to keep a single shuffle until restart.
+# Requests with ?action=next / ?action=previous step the cursor within the
+# current shuffle; ?action=refresh is a no-op; a plain GET (power-on or
+# timer wake) re-renders the current photo. Every response carries a
+# Refresh header pointing the device at its next wake-up.
+rotate.cron = "0 0 2,14 * * *"
 
 # Optional info overlay — day of week, date, weather.
 [screens.infobox]
@@ -33,7 +39,6 @@ background = "rgba(255, 255, 255, 0.8)"
 foreground = "#000000"
 latitude = 52.37
 longitude = 4.90
-# timezone = "Europe/Amsterdam"  # optional — defaults to system timezone
 units = "metric"               # metric (°C, km/h) | imperial (°F, mph)
 
 [screens.dither]
@@ -50,6 +55,10 @@ height = 448
 share_url = "https://photos.app.goo.gl/ANOTHER_SHARE_ID"
 fit = "contain"
 background = "blur"
+# Natural-language schedule (cron-lingo). See the crate docs for the full
+# grammar; typical forms: "at 6 AM", "at 7:30 AM and 7:30 PM",
+# "at 6 AM on Mondays, Wednesdays and Fridays".
+rotate.natural = "at 6 AM and 6 PM"
 
 [screens.dither]
 noise = "bayer:4"

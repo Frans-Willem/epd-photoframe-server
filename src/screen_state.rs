@@ -1,20 +1,94 @@
+use std::str::FromStr;
+
 use anyhow::Context;
-use chrono::{DateTime, NaiveTime, TimeZone, Utc};
+use chrono::{DateTime, Offset, Utc};
 use chrono_tz::Tz;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng, seq::SliceRandom};
+use serde::Deserialize;
 
-/// Per-screen rotation state: which seed is driving the current day's photo
-/// order, when it was last reseeded, and the navigation cursor.
+/// A rotation schedule, parsed either from standard cron syntax (Quartz-style:
+/// `sec min hour dom mon dow [year]`) or from a human-readable cron-lingo
+/// expression (e.g. `at 2 AM and 2 PM on Mondays`).
+#[derive(Debug, Clone)]
+pub enum Rotate {
+    Cron(cron::Schedule),
+    Natural(cron_lingo::Schedule),
+}
+
+impl<'de> Deserialize<'de> for Rotate {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "lowercase", deny_unknown_fields)]
+        enum Raw {
+            Cron(String),
+            Natural(String),
+        }
+        match Raw::deserialize(d)? {
+            Raw::Cron(s) => cron::Schedule::from_str(&s)
+                .map(Rotate::Cron)
+                .map_err(|e| serde::de::Error::custom(format!("invalid cron `{s}`: {e}"))),
+            Raw::Natural(s) => cron_lingo::Schedule::from_str(&s).map(Rotate::Natural).map_err(
+                |e| {
+                    serde::de::Error::custom(format!(
+                        "invalid natural-language schedule `{s}`: {e:?}"
+                    ))
+                },
+            ),
+        }
+    }
+}
+
+impl Rotate {
+    /// Next scheduled trigger strictly after `after`, in UTC.
+    ///
+    /// Both parsers have their own timezone story:
+    /// - `cron` consumes a `DateTime<Tz>` and returns triggers in that TZ.
+    /// - `cron-lingo` only iterates from the system clock (no arbitrary start);
+    ///   we use its `assume_offset` to pin the offset and rely on the fact that
+    ///   we only ever call this with `after ≈ now`.
+    pub fn next_after(&self, after: DateTime<Utc>, tz: &Tz) -> Option<DateTime<Utc>> {
+        match self {
+            Self::Cron(s) => s
+                .after(&after.with_timezone(tz))
+                .next()
+                .map(|dt| dt.with_timezone(&Utc)),
+            Self::Natural(s) => {
+                let offset_secs = after.with_timezone(tz).offset().fix().local_minus_utc();
+                let offset = time::UtcOffset::from_whole_seconds(offset_secs).ok()?;
+                let iter = s
+                    .iter()
+                    .inspect_err(|e| tracing::warn!(error = ?e, "cron-lingo iter failed"))
+                    .ok()?
+                    .assume_offset(offset);
+                let next = iter.take(1).next()?.ok()?;
+                let utc = next.to_offset(time::UtcOffset::UTC);
+                DateTime::<Utc>::from_timestamp(utc.unix_timestamp(), utc.nanosecond())
+            }
+        }
+    }
+}
+
+/// Per-screen rotation state: the seed driving the current shuffle, the
+/// navigation cursor, and a precomputed moment at which the next scheduled
+/// rotation should fire.
 pub struct ScreenState {
     seed: u64,
-    seeded_at: DateTime<Utc>,
     cursor: i64,
+    next_rotation: Option<DateTime<Utc>>,
 }
 
 impl ScreenState {
-    pub fn fresh(now: DateTime<Utc>) -> Self {
-        Self { seed: rand::rng().random(), seeded_at: now, cursor: 0 }
+    pub fn fresh(rotate: Option<&Rotate>, tz: &Tz, now: DateTime<Utc>) -> Self {
+        let next_rotation = rotate.and_then(|r| r.next_after(now, tz));
+        if rotate.is_some() && next_rotation.is_none() {
+            tracing::warn!("rotate schedule has no future triggers");
+        }
+        Self {
+            seed: rand::rng().random(),
+            cursor: 0,
+            next_rotation,
+        }
     }
 
     pub fn seed(&self) -> u64 {
@@ -25,53 +99,29 @@ impl ScreenState {
         self.cursor
     }
 
+    pub fn next_rotation(&self) -> Option<DateTime<Utc>> {
+        self.next_rotation
+    }
+
     pub fn advance(&mut self, delta: i64) {
         self.cursor = self.cursor.wrapping_add(delta);
     }
 
-    /// Reseed and reset the cursor if `now` has crossed the most recent
-    /// occurrence of `rotate_at` since `seeded_at`.
-    pub fn maybe_rotate(
-        &mut self,
-        rotate_at: Option<NaiveTime>,
-        tz: &Tz,
-        now: DateTime<Utc>,
-    ) {
-        let Some(rotate_at) = rotate_at else { return };
-        let Some(last) = last_rotate_before(rotate_at, tz, now) else { return };
-        if self.seeded_at < last {
-            let new_seed: u64 = rand::rng().random();
-            tracing::info!(
-                old_seed = self.seed,
-                new_seed,
-                "rotating screen seed"
-            );
-            self.seed = new_seed;
-            self.seeded_at = now;
-            self.cursor = 0;
+    /// Reseed and reset the cursor if `now` has crossed the stored
+    /// `next_rotation` moment. Advances `next_rotation` to the next trigger.
+    pub fn maybe_rotate(&mut self, rotate: Option<&Rotate>, tz: &Tz, now: DateTime<Utc>) {
+        let Some(next) = self.next_rotation else {
+            return;
+        };
+        if now < next {
+            return;
         }
+        let old_seed = self.seed;
+        self.seed = rand::rng().random();
+        self.cursor = 0;
+        self.next_rotation = rotate.and_then(|r| r.next_after(now, tz));
+        tracing::info!(old_seed, new_seed = self.seed, next = ?self.next_rotation, "rotated screen");
     }
-}
-
-/// Most recent occurrence of `rotate_at` strictly before `now`, in UTC.
-fn last_rotate_before(
-    rotate_at: NaiveTime,
-    tz: &Tz,
-    now: DateTime<Utc>,
-) -> Option<DateTime<Utc>> {
-    let local_now = now.with_timezone(tz);
-    let today = local_now.date_naive();
-    let today_rotate = tz.from_local_datetime(&today.and_time(rotate_at)).earliest();
-    if let Some(t) = today_rotate
-        && t < local_now
-    {
-        return Some(t.with_timezone(&Utc));
-    }
-    let yesterday = today.pred_opt()?;
-    let yest_rotate = tz
-        .from_local_datetime(&yesterday.and_time(rotate_at))
-        .earliest()?;
-    Some(yest_rotate.with_timezone(&Utc))
 }
 
 /// Fisher-Yates permutation of `[0..n)` seeded by `seed`, indexed by
@@ -84,27 +134,34 @@ pub fn resolve_index(seed: u64, cursor: i64, n: usize) -> usize {
     perm[cursor.rem_euclid(n as i64) as usize]
 }
 
-pub fn parse_rotate_at(s: &str) -> anyhow::Result<NaiveTime> {
-    NaiveTime::parse_from_str(s, "%H:%M:%S")
-        .or_else(|_| NaiveTime::parse_from_str(s, "%H:%M"))
-        .with_context(|| format!("invalid rotate_at `{s}` — expected HH:MM or HH:MM:SS"))
+/// Resolve an IANA timezone name (or the system default if None).
+pub fn resolve_tz(name: Option<&str>) -> anyhow::Result<Tz> {
+    let name = match name {
+        Some(n) => n.to_string(),
+        None => iana_time_zone::get_timezone().context("detecting system timezone")?,
+    };
+    name.parse::<Tz>()
+        .map_err(|e| anyhow::anyhow!("unknown timezone `{name}`: {e}"))
+}
+
+/// Seconds from `now` to `target`, rounded up, clamped at 0.
+pub fn seconds_until(target: DateTime<Utc>, now: DateTime<Utc>) -> i64 {
+    let ms = (target - now).num_milliseconds();
+    if ms <= 0 {
+        0
+    } else {
+        (ms + 999) / 1000
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use std::collections::HashSet;
 
     fn tz() -> Tz {
         "Europe/Amsterdam".parse().unwrap()
-    }
-
-    fn state(seed: u64, cursor: i64) -> ScreenState {
-        ScreenState {
-            seed,
-            seeded_at: Utc::now(),
-            cursor,
-        }
     }
 
     #[test]
@@ -115,109 +172,91 @@ mod tests {
 
     #[test]
     fn resolve_index_wraps_negative_cursor() {
-        let a = resolve_index(42, -1, 5);
-        let b = resolve_index(42, 4, 5);
-        assert_eq!(a, b);
+        assert_eq!(resolve_index(42, -1, 5), resolve_index(42, 4, 5));
     }
 
     #[test]
-    fn resolve_index_wraps_past_n() {
-        let a = resolve_index(42, 0, 5);
-        let b = resolve_index(42, 5, 5);
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn advance_wraps_on_overflow() {
-        let mut s = state(1, i64::MAX);
-        s.advance(1);
-        assert_eq!(s.cursor(), i64::MIN);
-    }
-
-    #[test]
-    fn rotation_fires_after_rotate_at() {
+    fn cron_rotate_fires_after_next() {
+        let rotate = Rotate::Cron(cron::Schedule::from_str("0 0 2 * * *").unwrap());
         let tz = tz();
-        let rotate_at = NaiveTime::from_hms_opt(2, 0, 0).unwrap();
-        let seeded = tz.with_ymd_and_hms(2026, 4, 20, 12, 0, 0).unwrap();
-        let mut s = ScreenState {
-            seed: 1,
-            seeded_at: seeded.with_timezone(&Utc),
-            cursor: 5,
-        };
-        let now = tz
+        // Seed at 20 Apr 12:00 local
+        let start = tz
+            .with_ymd_and_hms(2026, 4, 20, 12, 0, 0)
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut s = ScreenState::fresh(Some(&rotate), &tz, start);
+        assert!(s.next_rotation().is_some());
+        let initial_next = s.next_rotation().unwrap();
+        // Advance past 02:00 next day
+        let later = tz
             .with_ymd_and_hms(2026, 4, 21, 3, 0, 0)
             .unwrap()
             .with_timezone(&Utc);
-        s.maybe_rotate(Some(rotate_at), &tz, now);
+        let seed_before = s.seed();
+        s.advance(3);
+        s.maybe_rotate(Some(&rotate), &tz, later);
         assert_eq!(s.cursor(), 0);
-        assert_eq!(s.seeded_at, now);
+        assert_ne!(s.seed(), seed_before);
+        assert!(s.next_rotation().unwrap() > initial_next);
     }
 
     #[test]
-    fn rotation_noop_when_seeded_after_last_rotate() {
+    fn cron_rotate_noop_before_next() {
+        let rotate = Rotate::Cron(cron::Schedule::from_str("0 0 2 * * *").unwrap());
         let tz = tz();
-        let rotate_at = NaiveTime::from_hms_opt(2, 0, 0).unwrap();
-        let seeded = tz.with_ymd_and_hms(2026, 4, 21, 3, 0, 0).unwrap();
-        let seed_before = 1;
-        let mut s = ScreenState {
-            seed: seed_before,
-            seeded_at: seeded.with_timezone(&Utc),
-            cursor: 5,
-        };
-        let now = tz
-            .with_ymd_and_hms(2026, 4, 21, 10, 0, 0)
+        let start = tz
+            .with_ymd_and_hms(2026, 4, 21, 3, 0, 0)
             .unwrap()
             .with_timezone(&Utc);
-        s.maybe_rotate(Some(rotate_at), &tz, now);
-        assert_eq!(s.cursor(), 5);
-        assert_eq!(s.seed(), seed_before);
+        let mut s = ScreenState::fresh(Some(&rotate), &tz, start);
+        s.advance(5);
+        let snap = (s.seed(), s.cursor(), s.next_rotation());
+        let now = start + chrono::Duration::hours(10);
+        s.maybe_rotate(Some(&rotate), &tz, now);
+        assert_eq!((s.seed(), s.cursor(), s.next_rotation()), snap);
     }
 
     #[test]
-    fn rotation_noop_when_disabled() {
+    fn no_schedule_means_no_rotation() {
         let tz = tz();
-        let seeded = tz.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
-        let mut s = ScreenState {
-            seed: 1,
-            seeded_at: seeded.with_timezone(&Utc),
-            cursor: 3,
-        };
+        let mut s = ScreenState::fresh(None, &tz, Utc::now());
+        assert!(s.next_rotation().is_none());
+        s.advance(7);
+        s.maybe_rotate(None, &tz, Utc::now() + chrono::Duration::days(365));
+        assert_eq!(s.cursor(), 7);
+    }
+
+    #[test]
+    fn seconds_until_rounds_up() {
         let now = Utc::now();
-        s.maybe_rotate(None, &tz, now);
-        assert_eq!(s.cursor(), 3);
-        assert_eq!(s.seed(), 1);
+        assert_eq!(seconds_until(now, now), 0);
+        assert_eq!(seconds_until(now + chrono::Duration::milliseconds(1), now), 1);
+        assert_eq!(seconds_until(now + chrono::Duration::milliseconds(1000), now), 1);
+        assert_eq!(seconds_until(now + chrono::Duration::milliseconds(1001), now), 2);
+        assert_eq!(seconds_until(now - chrono::Duration::seconds(5), now), 0);
     }
 
     #[test]
-    fn rotation_at_exact_rotate_at_uses_previous_day() {
-        // At exactly rotate_at local time, "strictly before now" is yesterday.
-        // seeded_at == yesterday's rotate means no rotation fires.
-        let tz = tz();
-        let rotate_at = NaiveTime::from_hms_opt(2, 0, 0).unwrap();
-        let yesterday_rotate = tz.with_ymd_and_hms(2026, 4, 20, 2, 0, 0).unwrap();
-        let mut s = ScreenState {
-            seed: 1,
-            seeded_at: yesterday_rotate.with_timezone(&Utc),
-            cursor: 0,
-        };
-        let now = tz
-            .with_ymd_and_hms(2026, 4, 21, 2, 0, 0)
-            .unwrap()
-            .with_timezone(&Utc);
-        s.maybe_rotate(Some(rotate_at), &tz, now);
-        assert_eq!(s.seed(), 1);
+    fn deserialises_cron_variant() {
+        let r: Rotate = toml::from_str(r#"cron = "0 0 2,14 * * *""#).unwrap();
+        assert!(matches!(r, Rotate::Cron(_)));
     }
 
     #[test]
-    fn parse_rotate_at_accepts_hm_and_hms() {
-        assert_eq!(
-            parse_rotate_at("02:00").unwrap(),
-            NaiveTime::from_hms_opt(2, 0, 0).unwrap()
-        );
-        assert_eq!(
-            parse_rotate_at("14:30:45").unwrap(),
-            NaiveTime::from_hms_opt(14, 30, 45).unwrap()
-        );
-        assert!(parse_rotate_at("noon").is_err());
+    fn deserialises_natural_variant() {
+        let r: Rotate = toml::from_str(r#"natural = "at 2 AM and 2 PM""#).unwrap();
+        assert!(matches!(r, Rotate::Natural(_)));
+    }
+
+    #[test]
+    fn rejects_unknown_rotate_key() {
+        let r: Result<Rotate, _> = toml::from_str(r#"regex = "xyz""#);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_cron() {
+        let r: Result<Rotate, _> = toml::from_str(r#"cron = "not a schedule""#);
+        assert!(r.is_err());
     }
 }

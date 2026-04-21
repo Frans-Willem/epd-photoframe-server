@@ -12,15 +12,14 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use anyhow::Context;
 use axum::{
     Router,
-    extract::{Path, Query, State},
-    http::{HeaderValue, StatusCode, header},
+    extract::{OriginalUri, Path, Query, State},
+    http::{HeaderName, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::get,
 };
-use chrono::{NaiveTime, Utc};
+use chrono::Utc;
 use chrono_tz::Tz;
 use reqwest::Client;
 use serde::Deserialize;
@@ -28,13 +27,12 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use album::AlbumClient;
 use config::{Config, ScreenConfig};
-use screen_state::{ScreenState, parse_rotate_at, resolve_index};
+use screen_state::{ScreenState, resolve_index, resolve_tz, seconds_until};
 
 struct Screen {
     config: ScreenConfig,
     album: AlbumClient,
     state: Mutex<ScreenState>,
-    rotate_at: Option<NaiveTime>,
     tz: Tz,
 }
 
@@ -78,15 +76,9 @@ async fn main() -> anyhow::Result<()> {
         .into_iter()
         .map(|s| {
             let album = AlbumClient::new(s.share_url.clone())?;
-            let rotate_at = s.rotate_at.as_deref().map(parse_rotate_at).transpose()?;
-            let tz = resolve_system_tz()?;
-            let screen = Screen {
-                album,
-                state: Mutex::new(ScreenState::fresh(now)),
-                rotate_at,
-                tz,
-                config: s,
-            };
+            let tz = resolve_tz(s.timezone.as_deref())?;
+            let state = Mutex::new(ScreenState::fresh(s.rotate.as_ref(), &tz, now));
+            let screen = Screen { album, state, tz, config: s };
             Ok::<_, anyhow::Error>((screen.config.name.clone(), screen))
         })
         .collect::<anyhow::Result<_>>()?;
@@ -110,6 +102,7 @@ async fn main() -> anyhow::Result<()> {
 async fn screen_handler(
     Path(name): Path<String>,
     Query(q): Query<ScreenQuery>,
+    OriginalUri(uri): OriginalUri,
     State(state): State<AppState>,
 ) -> Result<Response, AppError> {
     let screen = state
@@ -117,15 +110,16 @@ async fn screen_handler(
         .get(&name)
         .ok_or_else(|| AppError::NotFound(format!("screen `{name}` not found")))?;
 
-    let (seed, cursor) = {
+    let now = Utc::now();
+    let (seed, cursor, next_rotation) = {
         let mut st = screen.state.lock().expect("screen state poisoned");
-        st.maybe_rotate(screen.rotate_at, &screen.tz, Utc::now());
+        st.maybe_rotate(screen.config.rotate.as_ref(), &screen.tz, now);
         match q.action {
             Some(Action::Next) => st.advance(1),
             Some(Action::Previous) => st.advance(-1),
             Some(Action::Refresh) | None => {}
         }
-        (st.seed(), st.cursor())
+        (st.seed(), st.cursor(), st.next_rotation())
     };
 
     tracing::info!(screen = %name, ?q.action, seed, cursor, "fetching image");
@@ -140,7 +134,7 @@ async fn screen_handler(
 
     let img = if let Some(infobox_cfg) = &cfg.infobox {
         let mut rgb = img.to_rgb8();
-        infobox::apply(&mut rgb, infobox_cfg, &state.http).await?;
+        infobox::apply(&mut rgb, infobox_cfg, &screen.tz, &state.http).await?;
         image::DynamicImage::ImageRgb8(rgb)
     } else {
         img
@@ -157,13 +151,18 @@ async fn screen_handler(
     response
         .headers_mut()
         .insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
-    Ok(response)
-}
 
-fn resolve_system_tz() -> anyhow::Result<Tz> {
-    let name = iana_time_zone::get_timezone().context("detecting system timezone")?;
-    name.parse::<Tz>()
-        .map_err(|e| anyhow::anyhow!("unknown timezone `{name}`: {e}"))
+    // Tell the client when to come back; URL strips query params so a next/
+    // previous action doesn't repeat on auto-refresh.
+    if let Some(next) = next_rotation
+        && let Ok(hv) = HeaderValue::from_str(&format!("{}; url={}", seconds_until(next, now), uri.path()))
+    {
+        response
+            .headers_mut()
+            .insert(HeaderName::from_static("refresh"), hv);
+    }
+
+    Ok(response)
 }
 
 // --- Error handling ---

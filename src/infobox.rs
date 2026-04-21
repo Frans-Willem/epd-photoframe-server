@@ -1,7 +1,6 @@
 use std::sync::LazyLock;
 
 use ab_glyph::{Font, FontRef, GlyphId, PxScale, ScaleFont, point};
-use anyhow::Context;
 use chrono::{DateTime, Datelike, Utc};
 use chrono_tz::Tz;
 use image::RgbImage;
@@ -28,9 +27,6 @@ pub struct InfoboxConfig {
     pub foreground: Color,
     pub latitude: f32,
     pub longitude: f32,
-    /// IANA timezone name (e.g. "Europe/Amsterdam"). Defaults to the system timezone.
-    #[serde(default)]
-    pub timezone: Option<String>,
     #[serde(default)]
     pub units: Units,
 }
@@ -65,20 +61,16 @@ impl Units {
     }
 }
 
-pub async fn apply(img: &mut RgbImage, cfg: &InfoboxConfig, client: &Client) -> anyhow::Result<()> {
-    let tz = resolve_tz(cfg.timezone.as_deref())?;
-    let now = Utc::now().with_timezone(&tz);
+pub async fn apply(
+    img: &mut RgbImage,
+    cfg: &InfoboxConfig,
+    tz: &Tz,
+    client: &Client,
+) -> anyhow::Result<()> {
+    let now = Utc::now().with_timezone(tz);
     let weather = weather::daily(client, cfg.latitude, cfg.longitude, tz.name(), cfg.units).await?;
     render(img, cfg, now, weather);
     Ok(())
-}
-
-fn resolve_tz(override_: Option<&str>) -> anyhow::Result<Tz> {
-    let name = match override_ {
-        Some(n) => n.to_string(),
-        None => iana_time_zone::get_timezone().context("detecting system timezone")?,
-    };
-    name.parse::<Tz>().map_err(|e| anyhow::anyhow!("unknown timezone `{name}`: {e}"))
 }
 
 fn render<T>(img: &mut RgbImage, cfg: &InfoboxConfig, now: DateTime<T>, weather: DailyWeather)
@@ -342,7 +334,6 @@ mod tests {
             foreground: Color::rgb(0, 0, 0),
             latitude: 0.0,
             longitude: 0.0,
-            timezone: None,
             units: Units::Metric,
         };
         let now = Utc.with_ymd_and_hms(2026, 4, 20, 12, 0, 0).unwrap();
