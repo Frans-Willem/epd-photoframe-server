@@ -6,6 +6,10 @@ use chrono_tz::Tz;
 use image::RgbImage;
 use reqwest::Client;
 use serde::Deserialize;
+use tiny_skia::{
+    Color as TsColor, FillRule, Paint, PathBuilder, Pixmap, PixmapPaint, PremultipliedColorU8,
+    Shader, Transform,
+};
 
 use crate::color::Color;
 use crate::weather::{self, DailyWeather};
@@ -126,20 +130,25 @@ where
     let fg = cfg.foreground;
 
     let (px, py) = place(img.width(), img.height(), box_w, box_h, cfg.position, edge);
-    paint_rounded_rect(img, px, py, box_w, box_h, radius, bg);
+
+    let Some(mut pm) = rgb_to_pixmap(img) else {
+        return;
+    };
+    paint_rounded_rect(&mut pm, px as f32, py as f32, box_w as f32, box_h as f32, radius, bg);
 
     let ox = px as f32 + internal_pad;
     let mut slot_top = py as f32 + internal_pad;
-    // Day
-    draw_line(img, text_font, text_scale, ox, slot_top + text_ascent, &day_text, fg);
+    let fg_ts = color_to_ts(fg);
+    draw_line(&mut pm, text_font, text_scale, ox, slot_top + text_ascent, &day_text, fg_ts);
     slot_top += text_line_h + line_gap;
-    // Date
-    draw_line(img, text_font, text_scale, ox, slot_top + text_ascent, &date_text, fg);
+    draw_line(&mut pm, text_font, text_scale, ox, slot_top + text_ascent, &date_text, fg_ts);
     slot_top += text_line_h + line_gap;
     // Weather line: share a baseline so icon and temp align visually.
     let baseline = slot_top + text_ascent.max(icon_ascent);
-    draw_line(img, icon_font, icon_scale, ox, baseline, &icon_text, fg);
-    draw_line(img, text_font, text_scale, ox + icon_w + icon_gap, baseline, &temp_text, fg);
+    draw_line(&mut pm, icon_font, icon_scale, ox, baseline, &icon_text, fg_ts);
+    draw_line(&mut pm, text_font, text_scale, ox + icon_w + icon_gap, baseline, &temp_text, fg_ts);
+
+    pixmap_to_rgb(&pm, img);
 }
 
 fn line_width<F: Font>(font: &F, scale: PxScale, text: &str) -> f32 {
@@ -157,19 +166,35 @@ fn line_width<F: Font>(font: &F, scale: PxScale, text: &str) -> f32 {
     w
 }
 
+fn paint_rounded_rect(pm: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, radius: f32, bg: Color) {
+    if w <= 0.0 || h <= 0.0 || bg.a == 0 {
+        return;
+    }
+    let Some(path) = rounded_rect_path(x, y, w, h, radius) else {
+        return;
+    };
+    let mut paint = Paint {
+        anti_alias: true,
+        ..Paint::default()
+    };
+    paint.shader = Shader::SolidColor(color_to_ts(bg));
+    pm.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+}
+
+/// Rasterize each glyph via `ab_glyph` into a small premul-RGBA pixmap, then
+/// composite it onto `pm` with tiny-skia's source-over.
 fn draw_line<F: Font>(
-    dst: &mut RgbImage,
+    pm: &mut Pixmap,
     font: &F,
     scale: PxScale,
     x: f32,
     baseline_y: f32,
     text: &str,
-    fg: Color,
+    fg: TsColor,
 ) {
     let s = font.as_scaled(scale);
     let mut cursor = x;
     let mut prev: Option<GlyphId> = None;
-    let fg_a = fg.a as f32 / 255.0;
     for c in text.chars() {
         let g = s.glyph_id(c);
         if let Some(p) = prev {
@@ -178,86 +203,84 @@ fn draw_line<F: Font>(
         let glyph = g.with_scale_and_position(scale, point(cursor, baseline_y));
         if let Some(outlined) = font.outline_glyph(glyph) {
             let bounds = outlined.px_bounds();
-            let ox = bounds.min.x as i32;
-            let oy = bounds.min.y as i32;
-            outlined.draw(|gx, gy, coverage| {
-                let px = ox + gx as i32;
-                let py = oy + gy as i32;
-                if px < 0 || py < 0 {
-                    return;
-                }
-                let (px, py) = (px as u32, py as u32);
-                if px >= dst.width() || py >= dst.height() {
-                    return;
-                }
-                let a = coverage * fg_a;
-                if a <= 0.0 {
-                    return;
-                }
-                let pixel = dst.get_pixel_mut(px, py);
-                pixel[0] = lerp_u8(pixel[0], fg.r, a);
-                pixel[1] = lerp_u8(pixel[1], fg.g, a);
-                pixel[2] = lerp_u8(pixel[2], fg.b, a);
-            });
+            let w = bounds.width().ceil() as u32;
+            let h = bounds.height().ceil() as u32;
+            if let Some(mut glyph_pm) = Pixmap::new(w, h) {
+                let (fr, fg_, fb, fa) = (fg.red(), fg.green(), fg.blue(), fg.alpha());
+                let pixels = glyph_pm.pixels_mut();
+                outlined.draw(|gx, gy, coverage| {
+                    if gx >= w || gy >= h {
+                        return;
+                    }
+                    let a = (coverage * fa).clamp(0.0, 1.0);
+                    let a8 = (a * 255.0).round() as u8;
+                    let r8 = (fr * a * 255.0).round().min(a8 as f32) as u8;
+                    let g8 = (fg_ * a * 255.0).round().min(a8 as f32) as u8;
+                    let b8 = (fb * a * 255.0).round().min(a8 as f32) as u8;
+                    let idx = (gy * w + gx) as usize;
+                    if let Some(c) = PremultipliedColorU8::from_rgba(r8, g8, b8, a8) {
+                        pixels[idx] = c;
+                    }
+                });
+                pm.draw_pixmap(
+                    bounds.min.x as i32,
+                    bounds.min.y as i32,
+                    glyph_pm.as_ref(),
+                    &PixmapPaint::default(),
+                    Transform::identity(),
+                    None,
+                );
+            }
         }
         cursor += s.h_advance(g);
         prev = Some(g);
     }
 }
 
-fn paint_rounded_rect(
-    img: &mut RgbImage,
-    x0: i32,
-    y0: i32,
-    w: u32,
-    h: u32,
-    radius: f32,
-    bg: Color,
-) {
-    let bg_a = bg.a as f32 / 255.0;
-    if w == 0 || h == 0 || bg_a <= 0.0 {
-        return;
+fn rounded_rect_path(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Option<tiny_skia::Path> {
+    // Cubic-Bezier quarter-circle control-point constant.
+    const K: f32 = 0.552_284_7;
+    let r = radius.max(0.0).min(w / 2.0).min(h / 2.0);
+    let cp = r * K;
+    let mut pb = PathBuilder::new();
+    pb.move_to(x + r, y);
+    pb.line_to(x + w - r, y);
+    pb.cubic_to(x + w - r + cp, y, x + w, y + r - cp, x + w, y + r);
+    pb.line_to(x + w, y + h - r);
+    pb.cubic_to(x + w, y + h - r + cp, x + w - r + cp, y + h, x + w - r, y + h);
+    pb.line_to(x + r, y + h);
+    pb.cubic_to(x + r - cp, y + h, x, y + h - r + cp, x, y + h - r);
+    pb.line_to(x, y + r);
+    pb.cubic_to(x, y + r - cp, x + r - cp, y, x + r, y);
+    pb.close();
+    pb.finish()
+}
+
+fn rgb_to_pixmap(img: &RgbImage) -> Option<Pixmap> {
+    let mut pm = Pixmap::new(img.width(), img.height())?;
+    let src = img.as_raw();
+    let dst = pm.pixels_mut();
+    for (i, pixel) in dst.iter_mut().enumerate() {
+        // Opaque source → premul == straight RGBA.
+        *pixel = PremultipliedColorU8::from_rgba(src[i * 3], src[i * 3 + 1], src[i * 3 + 2], 255)
+            .expect("alpha=255, always valid");
     }
-    let r = radius.max(0.0).min(w as f32 / 2.0).min(h as f32 / 2.0);
-    let (wf, hf) = (w as f32, h as f32);
-    for y in 0..h {
-        for x in 0..w {
-            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
-            // Compute coverage against the rounded-rect boundary.
-            let cov = if r <= 0.0 {
-                1.0
-            } else {
-                let (cx, cy) = if fx < r && fy < r {
-                    (r, r)
-                } else if fx > wf - r && fy < r {
-                    (wf - r, r)
-                } else if fx < r && fy > hf - r {
-                    (r, hf - r)
-                } else if fx > wf - r && fy > hf - r {
-                    (wf - r, hf - r)
-                } else {
-                    // Interior / straight edges — fully covered.
-                    blend_pixel(img, x0 + x as i32, y0 + y as i32, bg, bg_a);
-                    continue;
-                };
-                let d = ((fx - cx).powi(2) + (fy - cy).powi(2)).sqrt();
-                (r - d + 0.5).clamp(0.0, 1.0)
-            };
-            if cov > 0.0 {
-                blend_pixel(img, x0 + x as i32, y0 + y as i32, bg, cov * bg_a);
-            }
-        }
+    Some(pm)
+}
+
+fn pixmap_to_rgb(pm: &Pixmap, img: &mut RgbImage) {
+    // Compositing onto an opaque base keeps alpha at 255, so premul == straight.
+    let src = pm.pixels();
+    let dst = img.as_mut();
+    for (i, p) in src.iter().enumerate() {
+        dst[i * 3] = p.red();
+        dst[i * 3 + 1] = p.green();
+        dst[i * 3 + 2] = p.blue();
     }
 }
 
-fn blend_pixel(img: &mut RgbImage, x: i32, y: i32, src: Color, src_a: f32) {
-    if src_a <= 0.0 || x < 0 || y < 0 || x >= img.width() as i32 || y >= img.height() as i32 {
-        return;
-    }
-    let p = img.get_pixel_mut(x as u32, y as u32);
-    p[0] = lerp_u8(p[0], src.r, src_a);
-    p[1] = lerp_u8(p[1], src.g, src_a);
-    p[2] = lerp_u8(p[2], src.b, src_a);
+fn color_to_ts(c: Color) -> TsColor {
+    TsColor::from_rgba8(c.r, c.g, c.b, c.a)
 }
 
 fn place(
@@ -285,12 +308,6 @@ fn place(
         Position::Bottom => (hcenter, bottom),
         Position::BottomRight => (right, bottom),
     }
-}
-
-fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
-    (a as f32 * (1.0 - t) + b as f32 * t)
-        .round()
-        .clamp(0.0, 255.0) as u8
 }
 
 const MONTHS: [&str; 12] = [
