@@ -7,11 +7,11 @@ use image::RgbImage;
 use reqwest::Client;
 use serde::Deserialize;
 use tiny_skia::{
-    Color as TsColor, FillRule, Paint, PathBuilder, Pixmap, PixmapPaint, PremultipliedColorU8,
-    Shader, Transform,
+    Color, FillRule, Paint, PathBuilder, Pixmap, PixmapPaint, PremultipliedColorU8, Shader,
+    Transform,
 };
 
-use crate::color::Color;
+use crate::color::ColorConfig;
 use crate::weather::{self, DailyWeather};
 
 static TEXT_FONT: LazyLock<FontRef<'static>> = LazyLock::new(|| {
@@ -27,8 +27,8 @@ static ICON_FONT: LazyLock<FontRef<'static>> = LazyLock::new(|| {
 #[serde(deny_unknown_fields)]
 pub struct InfoboxConfig {
     pub position: Position,
-    pub background: Color,
-    pub foreground: Color,
+    pub background: ColorConfig,
+    pub foreground: ColorConfig,
     pub latitude: f32,
     pub longitude: f32,
     #[serde(default)]
@@ -138,7 +138,7 @@ where
 
     let ox = px as f32 + internal_pad;
     let mut slot_top = py as f32 + internal_pad;
-    let fg_ts = color_to_ts(fg);
+    let fg_ts = fg.to_tiny_skia();
     draw_line(&mut pm, text_font, text_scale, ox, slot_top + text_ascent, &day_text, fg_ts);
     slot_top += text_line_h + line_gap;
     draw_line(&mut pm, text_font, text_scale, ox, slot_top + text_ascent, &date_text, fg_ts);
@@ -166,8 +166,16 @@ fn line_width<F: Font>(font: &F, scale: PxScale, text: &str) -> f32 {
     w
 }
 
-fn paint_rounded_rect(pm: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, radius: f32, bg: Color) {
-    if w <= 0.0 || h <= 0.0 || bg.a == 0 {
+fn paint_rounded_rect(
+    pm: &mut Pixmap,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius: f32,
+    bg: ColorConfig,
+) {
+    if w <= 0.0 || h <= 0.0 || bg.0.alpha() == 0 {
         return;
     }
     let Some(path) = rounded_rect_path(x, y, w, h, radius) else {
@@ -177,7 +185,7 @@ fn paint_rounded_rect(pm: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, radius: f
         anti_alias: true,
         ..Paint::default()
     };
-    paint.shader = Shader::SolidColor(color_to_ts(bg));
+    paint.shader = Shader::SolidColor(bg.to_tiny_skia());
     pm.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
 }
 
@@ -190,7 +198,7 @@ fn draw_line<F: Font>(
     x: f32,
     baseline_y: f32,
     text: &str,
-    fg: TsColor,
+    fg: Color,
 ) {
     let s = font.as_scaled(scale);
     let mut cursor = x;
@@ -279,10 +287,6 @@ fn pixmap_to_rgb(pm: &Pixmap, img: &mut RgbImage) {
     }
 }
 
-fn color_to_ts(c: Color) -> TsColor {
-    TsColor::from_rgba8(c.r, c.g, c.b, c.a)
-}
-
 fn place(
     scr_w: u32,
     scr_h: u32,
@@ -347,8 +351,8 @@ mod tests {
         let mut img = RgbImage::from_pixel(800, 600, Rgb([120, 120, 120]));
         let cfg = InfoboxConfig {
             position: Position::BottomLeft,
-            background: Color::rgba(255, 255, 255, 220),
-            foreground: Color::rgb(0, 0, 0),
+            background: ColorConfig::rgba(255, 255, 255, 220),
+            foreground: ColorConfig::rgb(0, 0, 0),
             latitude: 0.0,
             longitude: 0.0,
             units: Units::Metric,

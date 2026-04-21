@@ -49,12 +49,12 @@ fn offset_y(fg: &RgbImage, height: u32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::color::Color;
+    use crate::color::ColorConfig;
 
     #[test]
     fn exact_size_passes_through() {
         let src = RgbImage::from_pixel(200, 200, Rgb([10, 20, 30]));
-        let out = apply(src, 200, 200, &BackgroundMethod::Solid(Color::rgb(0, 0, 0))).unwrap();
+        let out = apply(src, 200, 200, &BackgroundMethod::Solid(ColorConfig::rgb(0, 0, 0))).unwrap();
         assert_eq!((out.width(), out.height()), (200, 200));
         assert_eq!(out.get_pixel(0, 0), &Rgb([10, 20, 30]));
     }
@@ -62,7 +62,7 @@ mod tests {
     #[test]
     fn oversized_errors() {
         let src = RgbImage::from_pixel(300, 200, Rgb([0, 0, 0]));
-        let err = apply(src, 200, 200, &BackgroundMethod::Solid(Color::rgb(0, 0, 0))).unwrap_err();
+        let err = apply(src, 200, 200, &BackgroundMethod::Solid(ColorConfig::rgb(0, 0, 0))).unwrap_err();
         assert!(err.to_string().contains("larger than requested"));
     }
 
@@ -70,7 +70,7 @@ mod tests {
     fn solid_centres_smaller_image() {
         let src = RgbImage::from_pixel(100, 80, Rgb([128, 0, 0]));
         let out =
-            apply(src, 200, 200, &BackgroundMethod::Solid(Color::rgb(0, 255, 0))).unwrap();
+            apply(src, 200, 200, &BackgroundMethod::Solid(ColorConfig::rgb(0, 255, 0))).unwrap();
         assert_eq!((out.width(), out.height()), (200, 200));
         assert_eq!(out.get_pixel(100, 100), &Rgb([128, 0, 0]));
         assert_eq!(out.get_pixel(0, 0), &Rgb([0, 255, 0]));
@@ -80,7 +80,7 @@ mod tests {
     fn solid_ignores_alpha() {
         let src = RgbImage::from_pixel(100, 80, Rgb([0, 0, 0]));
         let out =
-            apply(src, 200, 200, &BackgroundMethod::Solid(Color::rgba(10, 20, 30, 0))).unwrap();
+            apply(src, 200, 200, &BackgroundMethod::Solid(ColorConfig::rgba(10, 20, 30, 0))).unwrap();
         assert_eq!(out.get_pixel(0, 0), &Rgb([10, 20, 30]));
     }
 }

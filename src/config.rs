@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use std::str::FromStr;
 
-use crate::color::Color;
+use crate::color::ColorConfig;
 use crate::infobox::InfoboxConfig;
 use crate::screen_state::Rotate;
 
@@ -61,14 +61,14 @@ pub enum FitMethod {
 #[derive(Debug, Clone)]
 pub enum BackgroundMethod {
     /// Pad with a solid colour. Alpha is ignored.
-    Solid(Color),
+    Solid(ColorConfig),
     /// Pad with a blurred cover-sized copy of the photo.
     Blur,
 }
 
 impl Default for BackgroundMethod {
     fn default() -> Self {
-        Self::Solid(Color::rgb(255, 255, 255))
+        Self::Solid(ColorConfig::rgb(255, 255, 255))
     }
 }
 
@@ -79,7 +79,7 @@ impl FromStr for BackgroundMethod {
         if s == "blur" {
             return Ok(Self::Blur);
         }
-        Color::from_str(s).map(Self::Solid)
+        ColorConfig::from_str(s).map(Self::Solid)
     }
 }
 
