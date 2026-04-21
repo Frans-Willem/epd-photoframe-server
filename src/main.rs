@@ -130,15 +130,11 @@ async fn screen_handler(
             resolve_index(seed, cursor, n)
         })
         .await?;
-    let img = background::apply(img, cfg.width, cfg.height, &cfg.background)?;
+    let mut img = background::apply(img, cfg.width, cfg.height, &cfg.background)?;
 
-    let img = if let Some(infobox_cfg) = &cfg.infobox {
-        let mut rgb = img.to_rgb8();
-        infobox::apply(&mut rgb, infobox_cfg, &screen.tz, &state.http).await?;
-        image::DynamicImage::ImageRgb8(rgb)
-    } else {
-        img
-    };
+    if let Some(infobox_cfg) = &cfg.infobox {
+        infobox::apply(&mut img, infobox_cfg, &screen.tz, &state.http).await?;
+    }
 
     let png = tokio::task::spawn_blocking({
         let dither_cfg = cfg.dither.clone();

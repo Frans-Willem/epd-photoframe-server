@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use image::DynamicImage;
+use image::RgbImage;
 use reqwest::Client;
 use tokio::sync::Mutex;
 
@@ -50,7 +50,7 @@ impl AlbumClient {
         height: u32,
         fit: &FitMethod,
         select: F,
-    ) -> anyhow::Result<DynamicImage>
+    ) -> anyhow::Result<RgbImage>
     where
         F: FnOnce(usize) -> usize,
     {
@@ -79,7 +79,7 @@ impl AlbumClient {
             .await
             .context("reading photo bytes")?;
 
-        image::load_from_memory(&bytes).context("decoding image")
+        Ok(image::load_from_memory(&bytes).context("decoding image")?.into_rgb8())
     }
 
     async fn photo_urls(&self) -> anyhow::Result<Vec<String>> {

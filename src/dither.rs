@@ -1,15 +1,15 @@
 use epd_dither::decompose::naive::{NaiveDecomposer, NaiveDecomposerStrategy};
 use epd_dither::decompose::octahedron::{OctahedronDecomposer, OctahedronDecomposerAxisStrategy};
-use image::{DynamicImage, ImageBuffer, Rgb};
+use image::{Rgb, RgbImage};
 use nalgebra::{DVector, geometry::Point3};
 use rand::distr::StandardUniform;
 use rand::prelude::*;
 
 use crate::config::{DitherConfig, NoiseSource, Strategy};
 
-fn color_to_point(color: Rgb<f32>) -> Point3<f32> {
+fn color_to_point(color: Rgb<u8>) -> Point3<f32> {
     let [r, g, b] = color.0;
-    Point3::new(r, g, b)
+    Point3::new(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0)
 }
 
 fn owned_to_dynamic_vector<T: nalgebra::Scalar, const N: usize>(
@@ -21,7 +21,7 @@ fn owned_to_dynamic_vector<T: nalgebra::Scalar, const N: usize>(
 // --- ImageSize / ImageReader / ImageWriter impls ---
 
 struct DitherBuffer<F: Fn(usize, usize) -> Option<f32>> {
-    image: ImageBuffer<Rgb<f32>, Vec<f32>>,
+    image: RgbImage,
     noise_fn: F,
     target: Vec<usize>,
 }
@@ -38,9 +38,9 @@ impl<F: Fn(usize, usize) -> Option<f32>> epd_dither::dither::diffuse::ImageSize
 }
 
 impl<F: Fn(usize, usize) -> Option<f32>>
-    epd_dither::dither::diffuse::ImageReader<(Rgb<f32>, Option<f32>)> for DitherBuffer<F>
+    epd_dither::dither::diffuse::ImageReader<(Rgb<u8>, Option<f32>)> for DitherBuffer<F>
 {
-    fn get_pixel(&self, x: usize, y: usize) -> (Rgb<f32>, Option<f32>) {
+    fn get_pixel(&self, x: usize, y: usize) -> (Rgb<u8>, Option<f32>) {
         (
             *self.image.get_pixel(x as u32, y as u32),
             (self.noise_fn)(x, y),
@@ -93,7 +93,7 @@ impl core::ops::AddAssign for DecomposedQuantizationError {
 }
 
 impl epd_dither::dither::diffuse::PixelStrategy for DecomposingDitherStrategy {
-    type Source = (Rgb<f32>, Option<f32>);
+    type Source = (Rgb<u8>, Option<f32>);
     type Target = usize;
     type QuantizationError = DecomposedQuantizationError;
 
@@ -134,17 +134,9 @@ impl epd_dither::dither::diffuse::PixelStrategy for DecomposingDitherStrategy {
 // --- Public entry point ---
 
 /// Dither `img` and return an indexed PNG at the image's own dimensions.
-pub fn process(img: DynamicImage, config: &DitherConfig) -> anyhow::Result<Vec<u8>> {
-    let input = img.into_rgb32f();
-
-    let dither_palette_f32: Vec<Rgb<f32>> = config
-        .dither_palette
-        .colors()
-        .iter()
-        .map(|c| Rgb(c.0.map(|x| x as f32 / 255.0)))
-        .collect();
+pub fn process(img: RgbImage, config: &DitherConfig) -> anyhow::Result<Vec<u8>> {
     let palette_points: Vec<Point3<f32>> =
-        dither_palette_f32.iter().copied().map(color_to_point).collect();
+        config.dither_palette.colors().iter().copied().map(color_to_point).collect();
 
     let decompose: Box<dyn Fn(Point3<f32>) -> DVector<f32>> = match config.strategy {
         Strategy::OctahedronClosest => {
@@ -189,7 +181,7 @@ pub fn process(img: DynamicImage, config: &DitherConfig) -> anyhow::Result<Vec<u
     };
 
     let mut buf = DitherBuffer {
-        image: input,
+        image: img,
         noise_fn,
         target: Vec::new(),
     };
