@@ -23,7 +23,8 @@ fn owned_to_dynamic_vector<T: nalgebra::Scalar, const N: usize>(
 struct DitherBuffer<F: Fn(usize, usize) -> Option<f32>> {
     image: RgbImage,
     noise_fn: F,
-    target: Vec<usize>,
+    /// Palette-indexed output, length `width * height`, pre-allocated.
+    target: Vec<u8>,
 }
 
 impl<F: Fn(usize, usize) -> Option<f32>> epd_dither::dither::diffuse::ImageSize
@@ -48,12 +49,14 @@ impl<F: Fn(usize, usize) -> Option<f32>>
     }
 }
 
-impl<F: Fn(usize, usize) -> Option<f32>> epd_dither::dither::diffuse::ImageWriter<usize>
+impl<F: Fn(usize, usize) -> Option<f32>> epd_dither::dither::diffuse::ImageWriter<u8>
     for DitherBuffer<F>
 {
-    fn put_pixel(&mut self, x: usize, y: usize, pixel: usize) {
+    fn put_pixel(&mut self, x: usize, y: usize, pixel: u8) {
         let w = self.image.width() as usize;
         let h = self.image.height() as usize;
+        // Defensive: ensures correctness even if caller forgot to pre-size.
+        // `Vec::resize` is a no-op when `len` already matches — cheap on the hot path.
         self.target.resize(w * h, 0);
         self.target[y * w + x] = pixel;
     }
@@ -94,7 +97,7 @@ impl core::ops::AddAssign for DecomposedQuantizationError {
 
 impl epd_dither::dither::diffuse::PixelStrategy for DecomposingDitherStrategy {
     type Source = (Rgb<u8>, Option<f32>);
-    type Target = usize;
+    type Target = u8;
     type QuantizationError = DecomposedQuantizationError;
 
     fn quantize(
@@ -127,7 +130,8 @@ impl epd_dither::dither::diffuse::PixelStrategy for DecomposingDitherStrategy {
 
         let mut err = decomposed;
         err[index] -= 1.0;
-        (index, DecomposedQuantizationError(Some(err)))
+        // Palette size is bounded by u8 (≤6 entries in practice); cast is safe.
+        (index as u8, DecomposedQuantizationError(Some(err)))
     }
 }
 
@@ -180,10 +184,11 @@ pub fn process(img: RgbImage, config: &DitherConfig) -> anyhow::Result<Vec<u8>> 
         }
     };
 
+    let pixel_count = (img.width() * img.height()) as usize;
     let mut buf = DitherBuffer {
         image: img,
         noise_fn,
-        target: Vec::new(),
+        target: vec![0u8; pixel_count],
     };
 
     epd_dither::dither::diffuse::diffuse_dither(
@@ -209,9 +214,8 @@ pub fn process(img: RgbImage, config: &DitherConfig) -> anyhow::Result<Vec<u8>> 
         .flat_map(|rgb| rgb.0)
         .collect();
     encoder.set_palette(palette_bytes);
-    let data: Vec<u8> = buf.target.iter().map(|&i| i as u8).collect();
     let mut writer = encoder.write_header()?;
-    writer.write_image_data(&data)?;
+    writer.write_image_data(&buf.target)?;
     drop(writer);
 
     Ok(png_bytes)

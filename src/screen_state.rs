@@ -23,12 +23,13 @@ impl Rotate {
             Self::Natural(s) => {
                 let offset_secs = after.with_timezone(tz).offset().fix().local_minus_utc();
                 let offset = time::UtcOffset::from_whole_seconds(offset_secs).ok()?;
-                let iter = s
+                let next = s
                     .iter()
                     .inspect_err(|e| tracing::warn!(error = ?e, "cron-lingo iter failed"))
                     .ok()?
-                    .assume_offset(offset);
-                let next = iter.take(1).next()?.ok()?;
+                    .assume_offset(offset)
+                    .next()?
+                    .ok()?;
                 let utc = next.to_offset(time::UtcOffset::UTC);
                 DateTime::<Utc>::from_timestamp(utc.unix_timestamp(), utc.nanosecond())
             }

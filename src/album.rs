@@ -15,7 +15,7 @@ const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
 const URL_PREFIX: &str = "https://lh3.googleusercontent.com/pw/";
 
 struct Cache {
-    urls: Vec<String>,
+    urls: Arc<Vec<String>>,
     fetched_at: Instant,
 }
 
@@ -82,19 +82,20 @@ impl AlbumClient {
         Ok(image::load_from_memory(&bytes).context("decoding image")?.into_rgb8())
     }
 
-    async fn photo_urls(&self) -> anyhow::Result<Vec<String>> {
+    async fn photo_urls(&self) -> anyhow::Result<Arc<Vec<String>>> {
         let mut guard = self.cache.lock().await;
         if let Some(c) = &*guard
             && c.fetched_at.elapsed() < CACHE_TTL
         {
-            return Ok(c.urls.clone());
+            return Ok(Arc::clone(&c.urls));
         }
 
         let urls = self.scrape().await?;
         tracing::info!(count = urls.len(), share_url = %self.share_url, "loaded album");
         anyhow::ensure!(!urls.is_empty(), "no photos found on share page — is the album public?");
 
-        *guard = Some(Cache { urls: urls.clone(), fetched_at: Instant::now() });
+        let urls = Arc::new(urls);
+        *guard = Some(Cache { urls: Arc::clone(&urls), fetched_at: Instant::now() });
         Ok(urls)
     }
 
