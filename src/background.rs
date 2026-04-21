@@ -49,7 +49,7 @@ fn offset_y(fg: &RgbImage, height: u32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::color::ColorConfig;
+    use crate::config::ColorConfig;
 
     #[test]
     fn exact_size_passes_through() {

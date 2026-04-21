@@ -5,13 +5,12 @@ use chrono::{DateTime, Datelike, Utc};
 use chrono_tz::Tz;
 use image::RgbImage;
 use reqwest::Client;
-use serde::Deserialize;
 use tiny_skia::{
     Color, FillRule, Paint, PathBuilder, Pixmap, PixmapPaint, PremultipliedColorU8, Shader,
     Transform,
 };
 
-use crate::color::ColorConfig;
+use crate::config::{ColorConfig, InfoboxConfig, Position, Units};
 use crate::weather::{self, DailyWeather};
 
 static TEXT_FONT: LazyLock<FontRef<'static>> = LazyLock::new(|| {
@@ -23,41 +22,8 @@ static ICON_FONT: LazyLock<FontRef<'static>> = LazyLock::new(|| {
         .expect("bundled icon font is invalid")
 });
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct InfoboxConfig {
-    pub position: Position,
-    pub background: ColorConfig,
-    pub foreground: ColorConfig,
-    pub latitude: f32,
-    pub longitude: f32,
-    #[serde(default)]
-    pub units: Units,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Position {
-    TopLeft,
-    Top,
-    TopRight,
-    Left,
-    Right,
-    BottomLeft,
-    Bottom,
-    BottomRight,
-}
-
-#[derive(Debug, Clone, Copy, Default, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Units {
-    #[default]
-    Metric,
-    Imperial,
-}
-
 impl Units {
-    fn temp_suffix(self) -> &'static str {
+    fn temperature_suffix(self) -> &'static str {
         match self {
             Units::Metric => "°C",
             Units::Imperial => "°F",
@@ -84,11 +50,11 @@ where
 {
     let day_text = now.format("%A").to_string();
     let date_text = format!("{} {} {}", now.day(), MONTHS[now.month0() as usize], now.year());
-    let temp_text = format!(
+    let temperature_text = format!(
         "{:.0}–{:.0}{}",
-        weather.temp_min.round(),
-        weather.temp_max.round(),
-        cfg.units.temp_suffix()
+        weather.temperature_min.round(),
+        weather.temperature_max.round(),
+        cfg.units.temperature_suffix()
     );
     let icon_text = wmo_icon(weather.weather_code).to_string();
 
@@ -117,8 +83,8 @@ where
     let day_w = line_width(text_font, text_scale, &day_text);
     let date_w = line_width(text_font, text_scale, &date_text);
     let icon_w = line_width(icon_font, icon_scale, &icon_text);
-    let temp_w = line_width(text_font, text_scale, &temp_text);
-    let weather_w = icon_w + icon_gap + temp_w;
+    let temperature_w = line_width(text_font, text_scale, &temperature_text);
+    let weather_w = icon_w + icon_gap + temperature_w;
 
     let content_w = day_w.max(date_w).max(weather_w);
     let content_h = text_line_h + line_gap + text_line_h + line_gap + weather_line_h;
@@ -143,10 +109,10 @@ where
     slot_top += text_line_h + line_gap;
     draw_line(&mut pm, text_font, text_scale, ox, slot_top + text_ascent, &date_text, fg_ts);
     slot_top += text_line_h + line_gap;
-    // Weather line: share a baseline so icon and temp align visually.
+    // Weather line: share a baseline so icon and temperature align visually.
     let baseline = slot_top + text_ascent.max(icon_ascent);
     draw_line(&mut pm, icon_font, icon_scale, ox, baseline, &icon_text, fg_ts);
-    draw_line(&mut pm, text_font, text_scale, ox + icon_w + icon_gap, baseline, &temp_text, fg_ts);
+    draw_line(&mut pm, text_font, text_scale, ox + icon_w + icon_gap, baseline, &temperature_text, fg_ts);
 
     pixmap_to_rgb(&pm, img);
 }
@@ -358,7 +324,7 @@ mod tests {
             units: Units::Metric,
         };
         let now = Utc.with_ymd_and_hms(2026, 4, 20, 12, 0, 0).unwrap();
-        let weather = DailyWeather { temp_min: 8.0, temp_max: 18.0, weather_code: 3 };
+        let weather = DailyWeather { temperature_min: 8.0, temperature_max: 18.0, weather_code: 3 };
         render(&mut img, &cfg, now, weather);
         // A corner pixel inside the box should no longer be the original grey.
         let corner = img.get_pixel(50, 550);

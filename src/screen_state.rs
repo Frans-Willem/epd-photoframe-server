@@ -1,43 +1,10 @@
-use std::str::FromStr;
-
 use anyhow::Context;
 use chrono::{DateTime, Offset, Utc};
 use chrono_tz::Tz;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng, seq::SliceRandom};
-use serde::Deserialize;
 
-/// A rotation schedule, parsed either from standard cron syntax (Quartz-style:
-/// `sec min hour dom mon dow [year]`) or from a human-readable cron-lingo
-/// expression (e.g. `at 2 AM and 2 PM on Mondays`).
-#[derive(Debug, Clone)]
-pub enum Rotate {
-    Cron(cron::Schedule),
-    Natural(cron_lingo::Schedule),
-}
-
-impl<'de> Deserialize<'de> for Rotate {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(rename_all = "lowercase", deny_unknown_fields)]
-        enum Raw {
-            Cron(String),
-            Natural(String),
-        }
-        match Raw::deserialize(d)? {
-            Raw::Cron(s) => cron::Schedule::from_str(&s)
-                .map(Rotate::Cron)
-                .map_err(|e| serde::de::Error::custom(format!("invalid cron `{s}`: {e}"))),
-            Raw::Natural(s) => cron_lingo::Schedule::from_str(&s).map(Rotate::Natural).map_err(
-                |e| {
-                    serde::de::Error::custom(format!(
-                        "invalid natural-language schedule `{s}`: {e:?}"
-                    ))
-                },
-            ),
-        }
-    }
-}
+use crate::config::Rotate;
 
 impl Rotate {
     /// Next scheduled trigger strictly after `after`, in UTC.
@@ -159,6 +126,7 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
     use std::collections::HashSet;
+    use std::str::FromStr;
 
     fn tz() -> Tz {
         "Europe/Amsterdam".parse().unwrap()
@@ -236,27 +204,4 @@ mod tests {
         assert_eq!(seconds_until(now - chrono::Duration::seconds(5), now), 0);
     }
 
-    #[test]
-    fn deserialises_cron_variant() {
-        let r: Rotate = toml::from_str(r#"cron = "0 0 2,14 * * *""#).unwrap();
-        assert!(matches!(r, Rotate::Cron(_)));
-    }
-
-    #[test]
-    fn deserialises_natural_variant() {
-        let r: Rotate = toml::from_str(r#"natural = "at 2 AM and 2 PM""#).unwrap();
-        assert!(matches!(r, Rotate::Natural(_)));
-    }
-
-    #[test]
-    fn rejects_unknown_rotate_key() {
-        let r: Result<Rotate, _> = toml::from_str(r#"regex = "xyz""#);
-        assert!(r.is_err());
-    }
-
-    #[test]
-    fn rejects_invalid_cron() {
-        let r: Result<Rotate, _> = toml::from_str(r#"cron = "not a schedule""#);
-        assert!(r.is_err());
-    }
 }
