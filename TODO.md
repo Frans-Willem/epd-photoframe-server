@@ -1,14 +1,5 @@
 # TODO
 
-## Variable-bit-depth indexed PNG output (parked)
-
-Implemented on `experiment/variable-bit-depth-png` (commit `d0d047c`):
-`DitherBuffer` packs indices MSB-first at 1/2/4/8 bpp depending on the
-output palette size, so the 6-colour Spectra 6 palette ships as 4 bpp
-(≈½ the raw-pixel payload vs 8 bpp). Blocked on the end devices — they
-currently assume 8 bpp indexed PNGs and need a decoder update before
-this can merge.
-
 ## Battery level reporting
 
 Device has an ADC reading the battery in millivolts. Still open:
