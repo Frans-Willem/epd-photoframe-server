@@ -31,6 +31,12 @@ background = "#FFFFFF"
 # timer wake) re-renders the current photo. Every response carries a
 # Refresh header pointing the device at its next wake-up.
 rotate.cron = "0 0 2,14 * * *"
+# How much later than the next scheduled rotation the device is instructed
+# to fetch the new image. Absorbs device-clock drift (the ESP32-S3 RTC can
+# be several percent off) so a single scheduled rotation doesn't turn into
+# two wakes when the device fires slightly early. Accepts humantime strings
+# like "30s", "15m", "1h 30m". Defaults to 0.
+wake_delay = "1h"
 
 # Optional info overlay — day of week, date, weather.
 [screens.infobox]

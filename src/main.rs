@@ -148,13 +148,18 @@ async fn screen_handler(
         .insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
 
     // Tell the client when to come back; URL strips query params so a next/
-    // previous action doesn't repeat on auto-refresh.
-    if let Some(next) = next_rotation
-        && let Ok(hv) = HeaderValue::from_str(&format!("{}; url={}", seconds_until(next, now), uri.path()))
-    {
-        response
-            .headers_mut()
-            .insert(HeaderName::from_static("refresh"), hv);
+    // previous action doesn't repeat on auto-refresh. wake_delay pushes the
+    // target past the scheduled rotation so early client-clock drift still
+    // lands on the new image; seconds_until rounds up to the next whole second.
+    if let Some(next) = next_rotation {
+        let target = next + chrono::Duration::from_std(cfg.wake_delay).unwrap_or_default();
+        if let Ok(hv) =
+            HeaderValue::from_str(&format!("{}; url={}", seconds_until(target, now), uri.path()))
+        {
+            response
+                .headers_mut()
+                .insert(HeaderName::from_static("refresh"), hv);
+        }
     }
 
     Ok(response)

@@ -1,5 +1,6 @@
 use serde::Deserialize;
 use std::str::FromStr;
+use std::time::Duration;
 use tiny_skia::ColorU8;
 
 // ----- Top-level config -----------------------------------------------------
@@ -33,12 +34,26 @@ pub struct ScreenConfig {
     /// If unset, the shuffle persists until the process restarts.
     #[serde(default)]
     pub rotate: Option<Rotate>,
+    /// How much later than the next scheduled rotation the device is
+    /// instructed to fetch the new image. Absorbs client-clock drift so a
+    /// single scheduled rotation only needs a single wake. Accepts a
+    /// humantime string, e.g. `"30s"`, `"15m"`, `"1h 30m"`. Defaults to zero.
+    #[serde(default, deserialize_with = "deserialize_duration")]
+    pub wake_delay: Duration,
     /// IANA timezone name (e.g. `Europe/Amsterdam`) used for rotation
     /// scheduling and the infobox. Defaults to the system timezone.
     #[serde(default)]
     pub timezone: Option<String>,
     #[serde(default)]
     pub dither: DitherConfig,
+}
+
+fn deserialize_duration<'de, D>(d: D) -> Result<Duration, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(d)?;
+    humantime::parse_duration(&s).map_err(serde::de::Error::custom)
 }
 
 impl Config {
@@ -412,6 +427,8 @@ mod tests {
         assert_eq!(cfg.screens.len(), 2);
         assert!(matches!(cfg.screens[0].rotate, Some(Rotate::Cron(_))));
         assert!(matches!(cfg.screens[1].rotate, Some(Rotate::Natural(_))));
+        assert_eq!(cfg.screens[0].wake_delay, Duration::from_secs(3600));
+        assert_eq!(cfg.screens[1].wake_delay, Duration::ZERO);
     }
 
     #[test]
