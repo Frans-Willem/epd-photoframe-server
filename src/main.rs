@@ -1,8 +1,10 @@
 mod album;
 mod background;
+mod battery_indicator;
 mod config;
 mod dither;
 mod infobox;
+mod overlay;
 mod screen_state;
 mod weather;
 
@@ -45,6 +47,8 @@ struct AppState {
 struct ScreenQuery {
     #[serde(default)]
     action: Option<Action>,
+    #[serde(default)]
+    battery_pct: Option<u8>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -133,6 +137,10 @@ async fn screen_handler(
 
     if let Some(infobox_cfg) = &cfg.infobox {
         infobox::apply(&mut img, infobox_cfg, &screen.tz, &state.http).await?;
+    }
+
+    if let (Some(indicator_cfg), Some(pct)) = (&cfg.battery_indicator, q.battery_pct) {
+        battery_indicator::apply(&mut img, indicator_cfg, pct);
     }
 
     let png = tokio::task::spawn_blocking({

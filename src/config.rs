@@ -28,6 +28,10 @@ pub struct ScreenConfig {
     /// Optional overlay showing day/date/weather.
     #[serde(default)]
     pub infobox: Option<InfoboxConfig>,
+    /// Optional overlay showing the device's reported battery level.
+    /// Only renders when the device has reported a `battery_pct` value.
+    #[serde(default)]
+    pub battery_indicator: Option<BatteryIndicatorConfig>,
     /// When the screen should reshuffle (a new seed + cursor reset).
     /// Either `{ cron = "<expr>" }` (Quartz-style 7-field cron) or
     /// `{ natural = "<phrase>" }` (cron-lingo, e.g. "at 2 AM and 2 PM").
@@ -281,6 +285,47 @@ pub enum Units {
     #[default]
     Metric,
     Imperial,
+}
+
+// ----- Battery indicator ----------------------------------------------------
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BatteryIndicatorConfig {
+    pub position: Position,
+    /// Outline of the battery cell, the terminal nub, the filled portion of
+    /// the level bar, and (for `text` / `both` styles) the percentage text.
+    pub foreground: ColorConfig,
+    /// Fill of the empty (depleted) portion of the level bar inside the
+    /// battery cell. Use a translucent value to let the photo show through.
+    pub empty_color: ColorConfig,
+    #[serde(default)]
+    pub style: BatteryStyle,
+    /// Optional low-charge fill colours. When the reported percentage is
+    /// `< below` for any entry, the most restrictive (lowest `below`) match
+    /// replaces `foreground` for the level fill, the percentage text, and
+    /// the cap-at-100 highlight. Order is ignored.
+    #[serde(default)]
+    pub thresholds: Vec<BatteryThreshold>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BatteryThreshold {
+    pub below: u8,
+    pub color: ColorConfig,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum BatteryStyle {
+    /// Battery glyph only.
+    Icon,
+    /// Percentage text only (e.g. `85%`).
+    Text,
+    /// Glyph and percentage text side by side.
+    #[default]
+    Both,
 }
 
 // ----- Dither ---------------------------------------------------------------

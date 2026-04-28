@@ -37,3 +37,40 @@ over the refresh interval. On an uncalibrated ESP32 RTC that's a few
 percent of the interval (so roughly 15–60 min for a daily rotation, a
 few seconds for a 5-minute rotation). The default is zero; the device
 is then told to wake exactly at the scheduled rotation.
+
+## `battery_indicator`
+
+If the device passes a `battery_pct` query parameter on its request
+(e.g. `GET /screen/living-room?battery_pct=72`), and the screen has a
+`[screens.battery_indicator]` section configured, the server overlays
+a small battery readout on the rendered image. The readout's `style`
+chooses between `icon` (a battery glyph alone), `text` (just `72%`),
+or `both` (the Android 16-style icon with the percentage number drawn
+inside it).
+
+The icon is a filled silhouette — body plus a small terminal nub on
+the right — with no outline. `empty_color` fills the silhouette;
+`foreground` overlays the charged portion of the body, growing left
+to right with a clean vertical edge at the level boundary. For
+`style = "both"`, the percentage number (no `%` sign) is centred over
+the body and drawn twice with inverted clip masks: in `foreground`
+over the empty portion, and in `empty_color` over the charged
+portion. This keeps the digits readable on both halves regardless of
+where the level boundary falls.
+
+Battery readings are not stored between requests — a request without
+`battery_pct` simply gets no overlay. The percentage is computed on
+the device; the server treats whatever the device sends as ground
+truth and clamps it to `[0, 100]`.
+
+The optional `thresholds` array swaps the level-fill colour (and the
+overlay text in `style = "both"`) at low charge — the same idea as
+Android's yellow-then-red shift. List `{ below, color }` pairs in any
+order; the most restrictive match (lowest `below` such that
+`pct < below`) wins. Default Android values mirror the framework
+constants `config_lowBatteryWarningLevel = 20` and
+`config_criticalBatteryWarningLevel = 10`, with the dark-theme
+`Warning` and `Error` colours from `BatteryDrawableState.kt`'s
+`ColorProfile`. Note that on a real device the yellow tier triggers
+on battery-saver mode rather than a fixed percentage, so the two-tier
+threshold form is an approximation of the user-visible behaviour.

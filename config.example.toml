@@ -47,6 +47,28 @@ latitude = 52.37
 longitude = 4.90
 units = "metric"               # metric (°C, km/h) | imperial (°F, mph)
 
+# Optional battery indicator. Renders only when the request includes a
+# `battery_pct` query parameter (the device sends it; the server doesn't
+# store readings between requests). The indicator has no opaque box behind
+# it: only the inside of the battery cell is filled (`empty_color` for the
+# depleted portion, `foreground` for the charged portion); text floats
+# directly on the photo.
+[screens.battery_indicator]
+position = "top-right"
+foreground = "#FFFFFF"               # outline + nub + filled portion + text
+empty_color = "rgba(0, 0, 0, 0.4)"   # depleted portion of the battery cell
+style = "both"                       # icon | text | both
+# Optional low-charge fill colours. The lowest-`below` matching entry wins,
+# so list them in any order. Thresholds and colours below mirror Android's
+# defaults — config_lowBatteryWarningLevel = 20 and
+# config_criticalBatteryWarningLevel = 10 from core/res/res/values/config.xml,
+# with the dark-theme Warning (#F29900) and Error (#C5221F) colours from
+# BatteryDrawableState.kt's ColorProfile.
+thresholds = [
+    { below = 20, color = "#F29900" },
+    { below = 10, color = "#C5221F" },
+]
+
 [screens.dither]
 noise = "ign"                   # none | bayer | bayer:N | ign | white
 strategy = "octahedron-closest" # octahedron-closest | octahedron-furthest | naive-mix | naive-dominant
