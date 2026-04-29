@@ -55,12 +55,25 @@ pub async fn daily(
         .await
         .context("parsing weather JSON")?;
 
-    let max = *resp.daily.temperature_2m_max.first()
+    let max = *resp
+        .daily
+        .temperature_2m_max
+        .first()
         .context("weather response had no max temperature")?;
-    let min = *resp.daily.temperature_2m_min.first()
+    let min = *resp
+        .daily
+        .temperature_2m_min
+        .first()
         .context("weather response had no min temperature")?;
-    let code = *resp.daily.weather_code.first()
+    let code = *resp
+        .daily
+        .weather_code
+        .first()
         .context("weather response had no weather code")?;
 
-    Ok(DailyWeather { temperature_min: min, temperature_max: max, weather_code: code })
+    Ok(DailyWeather {
+        temperature_min: min,
+        temperature_max: max,
+        weather_code: code,
+    })
 }

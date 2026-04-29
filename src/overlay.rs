@@ -42,12 +42,19 @@ pub fn paint_rounded_rect(
         ..Paint::default()
     };
     paint.shader = Shader::SolidColor(bg.to_tiny_skia());
-    pm.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+    pm.fill_path(
+        &path,
+        &paint,
+        FillRule::Winding,
+        Transform::identity(),
+        None,
+    );
 }
 
 /// Rasterize each glyph via `ab_glyph` into a small premul-RGBA pixmap, then
 /// composite it onto `pm` with tiny-skia's source-over. If `mask` is provided,
 /// the glyph composite is clipped to it.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_line<F: Font>(
     pm: &mut Pixmap,
     font: &F,
@@ -129,7 +136,14 @@ pub fn asymmetric_rounded_rect_path(
     pb.line_to(x + w - rr, y);
     pb.cubic_to(x + w - rr + rcp, y, x + w, y + rr - rcp, x + w, y + rr);
     pb.line_to(x + w, y + h - rr);
-    pb.cubic_to(x + w, y + h - rr + rcp, x + w - rr + rcp, y + h, x + w - rr, y + h);
+    pb.cubic_to(
+        x + w,
+        y + h - rr + rcp,
+        x + w - rr + rcp,
+        y + h,
+        x + w - rr,
+        y + h,
+    );
     pb.line_to(x + lr, y + h);
     pb.cubic_to(x + lr - lcp, y + h, x, y + h - lr + lcp, x, y + h - lr);
     pb.line_to(x, y + lr);
@@ -169,7 +183,13 @@ pub fn place(
     pos: Position,
     edge: u32,
 ) -> (i32, i32) {
-    let (sw, sh, bw, bh, e) = (scr_w as i32, scr_h as i32, box_w as i32, box_h as i32, edge as i32);
+    let (sw, sh, bw, bh, e) = (
+        scr_w as i32,
+        scr_h as i32,
+        box_w as i32,
+        box_h as i32,
+        edge as i32,
+    );
     let left = e;
     let right = (sw - bw - e).max(0);
     let top = e;

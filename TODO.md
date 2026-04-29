@@ -38,17 +38,6 @@ Spectra 6 modules and may ship with slightly different pigment
 balances; possibly even per-unit if variance between two E1002s
 turns out to matter.
 
-## Run cargo clippy and rustfmt
-The tree currently has six pre-existing `clippy::collapsible_if`
-warnings in `src/main.rs` — back-to-back forms like
-`if cfg.publish.contains(&Publish::Power) { if let Some(v) = q.power
-{ … } }` that fold cleanly with `&& let` on the 2024 edition. Once
-those are tidied, run `cargo fmt` across the workspace and consider
-wiring `cargo fmt --check` and `cargo clippy --all-targets -- -D
-warnings` into a pre-push or CI step so new warnings surface
-immediately rather than accumulating into another sweep like this
-one.
-
 ## action=refresh should refresh the album
 Today `?action=refresh` is a no-op (see the comment in
 `config.example.toml`: "?action=next / ?action=previous step the

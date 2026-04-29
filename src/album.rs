@@ -79,7 +79,9 @@ impl AlbumClient {
             .await
             .context("reading photo bytes")?;
 
-        Ok(image::load_from_memory(&bytes).context("decoding image")?.into_rgb8())
+        Ok(image::load_from_memory(&bytes)
+            .context("decoding image")?
+            .into_rgb8())
     }
 
     async fn photo_urls(&self) -> anyhow::Result<Arc<Vec<String>>> {
@@ -92,10 +94,16 @@ impl AlbumClient {
 
         let urls = self.scrape().await?;
         tracing::info!(count = urls.len(), share_url = %self.share_url, "loaded album");
-        anyhow::ensure!(!urls.is_empty(), "no photos found on share page — is the album public?");
+        anyhow::ensure!(
+            !urls.is_empty(),
+            "no photos found on share page — is the album public?"
+        );
 
         let urls = Arc::new(urls);
-        *guard = Some(Cache { urls: Arc::clone(&urls), fetched_at: Instant::now() });
+        *guard = Some(Cache {
+            urls: Arc::clone(&urls),
+            fetched_at: Instant::now(),
+        });
         Ok(urls)
     }
 
@@ -173,8 +181,14 @@ mod tests {
     #[test]
     fn size_suffixes() {
         assert_eq!(size_suffix(1200, 1600, &FitMethod::Crop), "=w1200-h1600-c");
-        assert_eq!(size_suffix(1200, 1600, &FitMethod::SmartCrop), "=w1200-h1600-p");
-        assert_eq!(size_suffix(1200, 1600, &FitMethod::Resize), "=w1200-h1600-s");
+        assert_eq!(
+            size_suffix(1200, 1600, &FitMethod::SmartCrop),
+            "=w1200-h1600-p"
+        );
+        assert_eq!(
+            size_suffix(1200, 1600, &FitMethod::Resize),
+            "=w1200-h1600-s"
+        );
         assert_eq!(size_suffix(1200, 1600, &FitMethod::Contain), "=w1200-h1600");
     }
 }

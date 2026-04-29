@@ -56,7 +56,11 @@ pub fn placeholder(
     let h_lh = h_s.height();
     let d_lh = d_s.height();
     let total_h = heading_lines.len() as f32 * h_lh
-        + (if detail_lines.is_empty() { 0.0 } else { block_gap })
+        + (if detail_lines.is_empty() {
+            0.0
+        } else {
+            block_gap
+        })
         + detail_lines.len() as f32 * d_lh;
 
     let Some(mut pm) = rgb_to_pixmap(&img) else {
@@ -70,7 +74,16 @@ pub fn placeholder(
     for line in &heading_lines {
         let lw = line_width(font, heading_scale, line);
         let x = ((width as f32 - lw) / 2.0).max(0.0);
-        draw_line(&mut pm, font, heading_scale, x, y + h_ascent, line, fg_color, None);
+        draw_line(
+            &mut pm,
+            font,
+            heading_scale,
+            x,
+            y + h_ascent,
+            line,
+            fg_color,
+            None,
+        );
         y += h_lh;
     }
     if !detail_lines.is_empty() {
@@ -79,7 +92,16 @@ pub fn placeholder(
     for line in &detail_lines {
         let lw = line_width(font, detail_scale, line);
         let x = ((width as f32 - lw) / 2.0).max(0.0);
-        draw_line(&mut pm, font, detail_scale, x, y + d_ascent, line, fg_color, None);
+        draw_line(
+            &mut pm,
+            font,
+            detail_scale,
+            x,
+            y + d_ascent,
+            line,
+            fg_color,
+            None,
+        );
         y += d_lh;
     }
 
@@ -122,13 +144,23 @@ mod tests {
 
     #[test]
     fn placeholder_is_correct_size() {
-        let img = placeholder(800, 480, &BackgroundMethod::Solid(ColorConfig::rgb(255, 255, 255)), "boom");
+        let img = placeholder(
+            800,
+            480,
+            &BackgroundMethod::Solid(ColorConfig::rgb(255, 255, 255)),
+            "boom",
+        );
         assert_eq!((img.width(), img.height()), (800, 480));
     }
 
     #[test]
     fn placeholder_fills_background_and_renders_text() {
-        let img = placeholder(800, 480, &BackgroundMethod::Solid(ColorConfig::rgb(255, 255, 255)), "boom");
+        let img = placeholder(
+            800,
+            480,
+            &BackgroundMethod::Solid(ColorConfig::rgb(255, 255, 255)),
+            "boom",
+        );
         // A corner pixel — well outside the centred text — should be the
         // background colour.
         assert_eq!(img.get_pixel(0, 0), &Rgb([255, 255, 255]));
@@ -158,7 +190,12 @@ mod tests {
     fn text_inverts_background() {
         // Black background → white text. Find the brightest pixel near the
         // centre and confirm it's much closer to white than to black.
-        let img = placeholder(400, 300, &BackgroundMethod::Solid(ColorConfig::rgb(0, 0, 0)), "x");
+        let img = placeholder(
+            400,
+            300,
+            &BackgroundMethod::Solid(ColorConfig::rgb(0, 0, 0)),
+            "x",
+        );
         assert_eq!(img.get_pixel(0, 0), &Rgb([0, 0, 0]));
         let mut max_brightness = 0u16;
         let cx = img.width() / 2;
@@ -170,7 +207,11 @@ mod tests {
                 max_brightness = max_brightness.max(b);
             }
         }
-        assert!(max_brightness > 600, "expected near-white text on black, got max={}", max_brightness);
+        assert!(
+            max_brightness > 600,
+            "expected near-white text on black, got max={}",
+            max_brightness
+        );
     }
 
     #[test]

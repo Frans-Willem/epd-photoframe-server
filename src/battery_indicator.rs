@@ -71,16 +71,30 @@ struct Layout {
 }
 
 impl Layout {
-    fn body_x(&self) -> f32 { self.ox + BODY_LEFT * self.scale }
-    fn body_y(&self) -> f32 { self.oy + BODY_TOP * self.scale }
-    fn body_w(&self) -> f32 { (BODY_RIGHT - BODY_LEFT) * self.scale }
-    fn body_h(&self) -> f32 { (BODY_BOTTOM - BODY_TOP) * self.scale }
-    fn level_fill_w(&self, pct: u8) -> f32 { self.body_w() * (pct as f32 / 100.0) }
+    fn body_x(&self) -> f32 {
+        self.ox + BODY_LEFT * self.scale
+    }
+    fn body_y(&self) -> f32 {
+        self.oy + BODY_TOP * self.scale
+    }
+    fn body_w(&self) -> f32 {
+        (BODY_RIGHT - BODY_LEFT) * self.scale
+    }
+    fn body_h(&self) -> f32 {
+        (BODY_BOTTOM - BODY_TOP) * self.scale
+    }
+    fn level_fill_w(&self, pct: u8) -> f32 {
+        self.body_w() * (pct as f32 / 100.0)
+    }
 
     fn body_path(&self) -> Option<Path> {
         asymmetric_rounded_rect_path(
-            self.body_x(), self.body_y(), self.body_w(), self.body_h(),
-            BODY_LEFT_R * self.scale, BODY_RIGHT_R * self.scale,
+            self.body_x(),
+            self.body_y(),
+            self.body_w(),
+            self.body_h(),
+            BODY_LEFT_R * self.scale,
+            BODY_RIGHT_R * self.scale,
         )
     }
 
@@ -108,10 +122,11 @@ fn effective_fg(cfg: &BatteryIndicatorConfig, pct: u8) -> ColorConfig {
 }
 
 fn solid_paint(c: ColorConfig) -> Paint<'static> {
-    let mut p = Paint::default();
-    p.anti_alias = true;
-    p.shader = Shader::SolidColor(c.to_tiny_skia());
-    p
+    Paint {
+        shader: Shader::SolidColor(c.to_tiny_skia()),
+        anti_alias: true,
+        ..Paint::default()
+    }
 }
 
 fn render(img: &mut RgbImage, cfg: &BatteryIndicatorConfig, pct: u8) {
@@ -131,13 +146,22 @@ fn render(img: &mut RgbImage, cfg: &BatteryIndicatorConfig, pct: u8) {
     };
 
     let (px, py) = place(
-        img.width(), img.height(),
-        content_w.ceil() as u32, content_h.ceil() as u32,
-        cfg.position, edge,
+        img.width(),
+        img.height(),
+        content_w.ceil() as u32,
+        content_h.ceil() as u32,
+        cfg.position,
+        edge,
     );
 
-    let Some(mut pm) = rgb_to_pixmap(img) else { return };
-    let layout = Layout { ox: px as f32, oy: py as f32, scale };
+    let Some(mut pm) = rgb_to_pixmap(img) else {
+        return;
+    };
+    let layout = Layout {
+        ox: px as f32,
+        oy: py as f32,
+        scale,
+    };
     let fg = effective_fg(cfg, pct);
 
     match cfg.style {
@@ -148,7 +172,16 @@ fn render(img: &mut RgbImage, cfg: &BatteryIndicatorConfig, pct: u8) {
             let text = format!("{pct}%");
             let s = PxScale::from(outer_text_px);
             let baseline = layout.oy + font.as_scaled(s).ascent();
-            draw_line(&mut pm, font, s, layout.ox, baseline, &text, fg.to_tiny_skia(), None);
+            draw_line(
+                &mut pm,
+                font,
+                s,
+                layout.ox,
+                baseline,
+                &text,
+                fg.to_tiny_skia(),
+                None,
+            );
         }
         BatteryStyle::Both => {
             draw_silhouette(&mut pm, &layout, pct, fg, cfg.empty_color);
@@ -162,40 +195,48 @@ fn render(img: &mut RgbImage, cfg: &BatteryIndicatorConfig, pct: u8) {
 /// Body silhouette filled with `empty`, level fill from the left in `fg`,
 /// cap in `fg` at 100 % (the "fully charged" Android flourish) or `empty`
 /// otherwise.
-fn draw_silhouette(
-    pm: &mut Pixmap,
-    layout: &Layout,
-    pct: u8,
-    fg: ColorConfig,
-    empty: ColorConfig,
-) {
+fn draw_silhouette(pm: &mut Pixmap, layout: &Layout, pct: u8, fg: ColorConfig, empty: ColorConfig) {
     let body = layout.body_path();
     let cap = layout.cap_path();
     let cap_color = if pct == 100 { fg } else { empty };
 
     if let (Some(p), true) = (body.as_ref(), empty.0.alpha() > 0) {
-        pm.fill_path(p, &solid_paint(empty), FillRule::Winding, Transform::identity(), None);
+        pm.fill_path(
+            p,
+            &solid_paint(empty),
+            FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
     }
     if let (Some(p), true) = (cap.as_ref(), cap_color.0.alpha() > 0) {
-        pm.fill_path(p, &solid_paint(cap_color), FillRule::Winding, Transform::identity(), None);
+        pm.fill_path(
+            p,
+            &solid_paint(cap_color),
+            FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
     }
 
     // Level fill: a flat rect masked by the body so the right edge stays a
     // sharp vertical line at any pct.
     let fill_w = layout.level_fill_w(pct);
-    if fill_w > 0.0 {
-        if let (Some(path), Some(rect), Some(mut mask)) = (
+    if fill_w > 0.0
+        && let (Some(path), Some(rect), Some(mut mask)) = (
             body.as_ref(),
             Rect::from_xywh(layout.body_x(), layout.body_y(), fill_w, layout.body_h()),
             Mask::new(pm.width(), pm.height()),
-        ) {
-            mask.fill_path(path, FillRule::Winding, true, Transform::identity());
-            pm.fill_path(
-                &PathBuilder::from_rect(rect),
-                &solid_paint(fg),
-                FillRule::Winding, Transform::identity(), Some(&mask),
-            );
-        }
+        )
+    {
+        mask.fill_path(path, FillRule::Winding, true, Transform::identity());
+        pm.fill_path(
+            &PathBuilder::from_rect(rect),
+            &solid_paint(fg),
+            FillRule::Winding,
+            Transform::identity(),
+            Some(&mask),
+        );
     }
 }
 
@@ -221,31 +262,60 @@ fn draw_inverted_text(
     let canvas_y = layout.oy + TEXT_CANVAS_TOP * layout.scale;
     let canvas_w = TEXT_CANVAS_W * layout.scale;
     let text_x = canvas_x + (canvas_w - text_w) / 2.0;
-    let baseline = canvas_y
-        + (TEXT_CANVAS_H * layout.scale + text_px) / 2.0
+    let baseline = canvas_y + (TEXT_CANVAS_H * layout.scale + text_px) / 2.0
         - TEXT_VERTICAL_NUDGE * layout.scale;
 
-    let Some(body) = layout.body_path() else { return };
-    let Some(mut body_mask) = Mask::new(pm.width(), pm.height()) else { return };
+    let Some(body) = layout.body_path() else {
+        return;
+    };
+    let Some(mut body_mask) = Mask::new(pm.width(), pm.height()) else {
+        return;
+    };
     body_mask.fill_path(&body, FillRule::Winding, true, Transform::identity());
 
     // Pass 1: fg everywhere in the body. Inside the level-fill area this is
     // fg-on-fg (invisible) — pass 2 overpaints those pixels in `empty`.
-    draw_line(pm, font, px_scale, text_x, baseline, &text, fg.to_tiny_skia(), Some(&body_mask));
+    draw_line(
+        pm,
+        font,
+        px_scale,
+        text_x,
+        baseline,
+        &text,
+        fg.to_tiny_skia(),
+        Some(&body_mask),
+    );
 
     let fill_w = layout.level_fill_w(pct);
-    if fill_w <= 0.0 { return }
-    let Some(level_rect) = Rect::from_xywh(
-        layout.body_x(), layout.body_y(), fill_w, layout.body_h(),
-    ) else { return };
-    let Some(mut level_mask) = Mask::new(pm.width(), pm.height()) else { return };
+    if fill_w <= 0.0 {
+        return;
+    }
+    let Some(level_rect) =
+        Rect::from_xywh(layout.body_x(), layout.body_y(), fill_w, layout.body_h())
+    else {
+        return;
+    };
+    let Some(mut level_mask) = Mask::new(pm.width(), pm.height()) else {
+        return;
+    };
     level_mask.fill_path(
         &PathBuilder::from_rect(level_rect),
-        FillRule::Winding, true, Transform::identity(),
+        FillRule::Winding,
+        true,
+        Transform::identity(),
     );
     intersect_mask(&mut level_mask, &body_mask);
 
-    draw_line(pm, font, px_scale, text_x, baseline, &text, empty.to_tiny_skia(), Some(&level_mask));
+    draw_line(
+        pm,
+        font,
+        px_scale,
+        text_x,
+        baseline,
+        &text,
+        empty.to_tiny_skia(),
+        Some(&level_mask),
+    );
 }
 
 fn intersect_mask(dst: &mut Mask, other: &Mask) {
@@ -310,8 +380,14 @@ mod tests {
         let mut c = cfg(BatteryStyle::Icon);
         c.foreground = white;
         c.thresholds = vec![
-            BatteryThreshold { below: 20, color: yellow },
-            BatteryThreshold { below: 5, color: red },
+            BatteryThreshold {
+                below: 20,
+                color: yellow,
+            },
+            BatteryThreshold {
+                below: 5,
+                color: red,
+            },
         ];
         assert_eq!(effective_fg(&c, 100), white);
         assert_eq!(effective_fg(&c, 50), white);

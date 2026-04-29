@@ -81,7 +81,11 @@ impl PackedIndexWriter {
     fn new(width: usize, height: usize, bits_per_pixel: u8) -> Self {
         let px_per_byte = 8 / bits_per_pixel as usize;
         let row_bytes = width.div_ceil(px_per_byte);
-        Self { width, bits_per_pixel, target: vec![0u8; row_bytes * height] }
+        Self {
+            width,
+            bits_per_pixel,
+            target: vec![0u8; row_bytes * height],
+        }
     }
 
     fn row_bytes(&self) -> usize {
@@ -106,8 +110,13 @@ impl ImageWriter<usize> for PackedIndexWriter {
 
 /// Dither `img` and return an indexed PNG at the image's own dimensions.
 pub fn process(img: RgbImage, config: &DitherConfig) -> anyhow::Result<Vec<u8>> {
-    let palette_points: Vec<Point3<f32>> =
-        config.dither_palette.colors().iter().copied().map(color_to_point).collect();
+    let palette_points: Vec<Point3<f32>> = config
+        .dither_palette
+        .colors()
+        .iter()
+        .copied()
+        .map(color_to_point)
+        .collect();
 
     let noise = config.noise.clone();
     let noise_fn = move |x: usize, y: usize| -> Option<f32> {
@@ -115,9 +124,9 @@ pub fn process(img: RgbImage, config: &DitherConfig) -> anyhow::Result<Vec<u8>> 
             NoiseSource::None => None,
             NoiseSource::Bayer(Some(n)) => Some(epd_dither::noise::bayer(x, y, *n)),
             NoiseSource::Bayer(None) => Some(epd_dither::noise::bayer_inf(x, y)),
-            NoiseSource::InterleavedGradient => {
-                Some(epd_dither::noise::interleaved_gradient_noise(x as f32, y as f32))
-            }
+            NoiseSource::InterleavedGradient => Some(
+                epd_dither::noise::interleaved_gradient_noise(x as f32, y as f32),
+            ),
             NoiseSource::White => Some(rand::rng().sample(StandardUniform)),
         }
     };

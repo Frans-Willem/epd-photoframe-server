@@ -117,11 +117,7 @@ pub fn resolve_tz(name: Option<&str>) -> anyhow::Result<Tz> {
 /// Seconds from `now` to `target`, rounded up, clamped at 0.
 pub fn seconds_until(target: DateTime<Utc>, now: DateTime<Utc>) -> i64 {
     let ms = (target - now).num_milliseconds();
-    if ms <= 0 {
-        0
-    } else {
-        (ms + 999) / 1000
-    }
+    if ms <= 0 { 0 } else { (ms + 999) / 1000 }
 }
 
 /// The absolute moment at which an error response should ask the device to
@@ -222,9 +218,18 @@ mod tests {
     fn seconds_until_rounds_up() {
         let now = Utc::now();
         assert_eq!(seconds_until(now, now), 0);
-        assert_eq!(seconds_until(now + chrono::Duration::milliseconds(1), now), 1);
-        assert_eq!(seconds_until(now + chrono::Duration::milliseconds(1000), now), 1);
-        assert_eq!(seconds_until(now + chrono::Duration::milliseconds(1001), now), 2);
+        assert_eq!(
+            seconds_until(now + chrono::Duration::milliseconds(1), now),
+            1
+        );
+        assert_eq!(
+            seconds_until(now + chrono::Duration::milliseconds(1000), now),
+            1
+        );
+        assert_eq!(
+            seconds_until(now + chrono::Duration::milliseconds(1001), now),
+            2
+        );
         assert_eq!(seconds_until(now - chrono::Duration::seconds(5), now), 0);
     }
 

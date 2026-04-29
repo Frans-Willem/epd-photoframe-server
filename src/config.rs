@@ -32,10 +32,18 @@ pub struct MqttConfig {
     pub state_prefix: String,
 }
 
-fn default_mqtt_port() -> u16 { 1883 }
-fn default_mqtt_client_id() -> String { "epd-photoframe-server".into() }
-fn default_mqtt_discovery_prefix() -> String { "homeassistant".into() }
-fn default_mqtt_state_prefix() -> String { "epd-photoframe".into() }
+fn default_mqtt_port() -> u16 {
+    1883
+}
+fn default_mqtt_client_id() -> String {
+    "epd-photoframe-server".into()
+}
+fn default_mqtt_discovery_prefix() -> String {
+    "homeassistant".into()
+}
+fn default_mqtt_state_prefix() -> String {
+    "epd-photoframe".into()
+}
 
 #[derive(Debug, Deserialize)]
 pub struct ScreenConfig {
@@ -83,7 +91,10 @@ pub struct ScreenConfig {
     /// against `next_rotation + wake_delay` (the device's normal next-fetch
     /// target) so it never extends past one. Same humantime format as
     /// `wake_delay`. Defaults to `"1h"`.
-    #[serde(default = "default_error_refresh", deserialize_with = "deserialize_duration")]
+    #[serde(
+        default = "default_error_refresh",
+        deserialize_with = "deserialize_duration"
+    )]
     pub error_refresh: Duration,
     /// IANA timezone name (e.g. `Europe/Amsterdam`) used for rotation
     /// scheduling and the infobox. Defaults to the system timezone.
@@ -246,7 +257,9 @@ impl FromStr for ColorConfig {
             let b = parse_byte(parts[2])?;
             return Ok(Self::rgb(r, g, b));
         }
-        Err(format!("expected `#RRGGBB`, `rgb(...)`, or `rgba(...)`, got `{s}`"))
+        Err(format!(
+            "expected `#RRGGBB`, `rgb(...)`, or `rgba(...)`, got `{s}`"
+        ))
     }
 }
 
@@ -278,7 +291,8 @@ fn split_args(s: &str) -> Vec<&str> {
 }
 
 fn parse_byte(s: &str) -> Result<u8, String> {
-    s.parse::<u8>().map_err(|_| format!("invalid 0-255 byte `{s}`"))
+    s.parse::<u8>()
+        .map_err(|_| format!("invalid 0-255 byte `{s}`"))
 }
 
 /// CSS-style alpha: a float in `[0.0, 1.0]`, mapped to `[0, 255]`.
@@ -313,13 +327,13 @@ impl<'de> Deserialize<'de> for Rotate {
             Raw::Cron(s) => cron::Schedule::from_str(&s)
                 .map(Rotate::Cron)
                 .map_err(|e| serde::de::Error::custom(format!("invalid cron `{s}`: {e}"))),
-            Raw::Natural(s) => cron_lingo::Schedule::from_str(&s).map(Rotate::Natural).map_err(
-                |e| {
+            Raw::Natural(s) => cron_lingo::Schedule::from_str(&s)
+                .map(Rotate::Natural)
+                .map_err(|e| {
                     serde::de::Error::custom(format!(
                         "invalid natural-language schedule `{s}`: {e:?}"
                     ))
-                },
-            ),
+                }),
         }
     }
 }
@@ -497,7 +511,9 @@ pub enum DiffuseMethod {
 }
 
 impl DiffuseMethod {
-    pub fn to_boxed_matrix(&self) -> Box<dyn epd_dither::dither::diffusion_matrix::DiffusionMatrix> {
+    pub fn to_boxed_matrix(
+        &self,
+    ) -> Box<dyn epd_dither::dither::diffusion_matrix::DiffusionMatrix> {
         match self {
             Self::None => Box::new(epd_dither::dither::diffusion_matrix::NoDiffuse),
             Self::FloydSteinberg => Box::new(epd_dither::dither::diffusion_matrix::FloydSteinberg),
@@ -642,20 +658,38 @@ mod tests {
 
     #[test]
     fn color_hex_opaque() {
-        assert_eq!("#ff0000".parse::<ColorConfig>().unwrap(), ColorConfig::rgba(255, 0, 0, 255));
-        assert_eq!("#00ff80".parse::<ColorConfig>().unwrap(), ColorConfig::rgba(0, 255, 128, 255));
+        assert_eq!(
+            "#ff0000".parse::<ColorConfig>().unwrap(),
+            ColorConfig::rgba(255, 0, 0, 255)
+        );
+        assert_eq!(
+            "#00ff80".parse::<ColorConfig>().unwrap(),
+            ColorConfig::rgba(0, 255, 128, 255)
+        );
     }
 
     #[test]
     fn color_rgb_opaque() {
-        assert_eq!("rgb(255, 0, 0)".parse::<ColorConfig>().unwrap(), ColorConfig::rgba(255, 0, 0, 255));
-        assert_eq!("rgb(1,2,3)".parse::<ColorConfig>().unwrap(), ColorConfig::rgba(1, 2, 3, 255));
+        assert_eq!(
+            "rgb(255, 0, 0)".parse::<ColorConfig>().unwrap(),
+            ColorConfig::rgba(255, 0, 0, 255)
+        );
+        assert_eq!(
+            "rgb(1,2,3)".parse::<ColorConfig>().unwrap(),
+            ColorConfig::rgba(1, 2, 3, 255)
+        );
     }
 
     #[test]
     fn color_rgba_float_alpha() {
-        assert_eq!("rgba(255, 0, 0, 1.0)".parse::<ColorConfig>().unwrap(), ColorConfig::rgba(255, 0, 0, 255));
-        assert_eq!("rgba(255, 0, 0, 0)".parse::<ColorConfig>().unwrap(), ColorConfig::rgba(255, 0, 0, 0));
+        assert_eq!(
+            "rgba(255, 0, 0, 1.0)".parse::<ColorConfig>().unwrap(),
+            ColorConfig::rgba(255, 0, 0, 255)
+        );
+        assert_eq!(
+            "rgba(255, 0, 0, 0)".parse::<ColorConfig>().unwrap(),
+            ColorConfig::rgba(255, 0, 0, 0)
+        );
         let half = "rgba(0, 0, 0, 0.5)".parse::<ColorConfig>().unwrap();
         assert_eq!(half, ColorConfig::rgba(0, 0, 0, 128));
     }
@@ -696,7 +730,10 @@ mod tests {
 
     #[test]
     fn strategy_parses_unit_variants() {
-        assert!(matches!("octahedron-closest".parse(), Ok(Strategy::OctahedronClosest)));
+        assert!(matches!(
+            "octahedron-closest".parse(),
+            Ok(Strategy::OctahedronClosest)
+        ));
         assert!(matches!("naive-mix".parse(), Ok(Strategy::NaiveMix)));
         assert!(matches!("grayscale".parse(), Ok(Strategy::Grayscale)));
     }
@@ -760,8 +797,7 @@ mod tests {
 
     #[test]
     fn dither_palette_default_for_gray_pure_spread_is_grayscale4() {
-        let cfg: DitherConfig =
-            toml::from_str(r#"strategy = "gray-pure-spread:0.25""#).unwrap();
+        let cfg: DitherConfig = toml::from_str(r#"strategy = "gray-pure-spread:0.25""#).unwrap();
         assert!(matches!(cfg.dither_palette, Palette::Grayscale4));
         assert!(matches!(cfg.output_palette, Palette::Grayscale4));
     }

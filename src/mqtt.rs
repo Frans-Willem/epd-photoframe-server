@@ -95,7 +95,13 @@ fn enabled_sensors(cfg: &ScreenConfig) -> Vec<Sensor> {
 /// state-topic uses the original screen name verbatim.
 fn slug(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -162,8 +168,9 @@ impl Publisher {
         if let Some(options) = sensor.options {
             payload["options"] = serde_json::json!(options);
         }
-        if let Err(e) =
-            self.client.try_publish(&topic, QoS::AtLeastOnce, true, payload.to_string())
+        if let Err(e) = self
+            .client
+            .try_publish(&topic, QoS::AtLeastOnce, true, payload.to_string())
         {
             tracing::warn!(topic = %topic, error = %e, "mqtt discovery publish failed");
         }
@@ -173,8 +180,9 @@ impl Publisher {
     /// outbound queue is full.
     pub fn publish(&self, screen: &str, key: &str, value: impl ToString) {
         let topic = format!("{}/{}/{}", self.state_prefix, screen, key);
-        if let Err(e) =
-            self.client.try_publish(&topic, QoS::AtMostOnce, true, value.to_string())
+        if let Err(e) = self
+            .client
+            .try_publish(&topic, QoS::AtMostOnce, true, value.to_string())
         {
             tracing::warn!(topic = %topic, error = %e, "mqtt state publish failed");
         }
@@ -213,7 +221,10 @@ mod tests {
     #[test]
     fn enabled_sensors_battery_includes_both_mv_and_pct() {
         let s = enabled_sensors(&screen_with(r#"["battery"]"#));
-        assert_eq!(keys(&s), ["battery_pct", "battery_mv"].into_iter().collect());
+        assert_eq!(
+            keys(&s),
+            ["battery_pct", "battery_mv"].into_iter().collect()
+        );
     }
 
     #[test]
@@ -229,23 +240,38 @@ mod tests {
         ));
         assert_eq!(
             keys(&s),
-            ["battery_pct", "battery_mv", "temperature", "humidity", "power", "last_seen"]
-                .into_iter()
-                .collect()
+            [
+                "battery_pct",
+                "battery_mv",
+                "temperature",
+                "humidity",
+                "power",
+                "last_seen"
+            ]
+            .into_iter()
+            .collect()
         );
     }
 
     #[test]
     fn duplicate_publish_entries_collapse() {
         let s = enabled_sensors(&screen_with(r#"["battery", "battery", "last_seen"]"#));
-        assert_eq!(keys(&s), ["battery_pct", "battery_mv", "last_seen"].into_iter().collect());
+        assert_eq!(
+            keys(&s),
+            ["battery_pct", "battery_mv", "last_seen"]
+                .into_iter()
+                .collect()
+        );
     }
 
     #[test]
     fn power_sensor_is_an_enum_with_four_options() {
         assert_eq!(POWER.device_class, "enum");
         assert!(POWER.unit.is_none());
-        assert_eq!(POWER.options, Some(&["battery", "charging", "full", "fault"][..]));
+        assert_eq!(
+            POWER.options,
+            Some(&["battery", "charging", "full", "fault"][..])
+        );
     }
 
     #[test]

@@ -32,9 +32,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use album::AlbumClient;
 use config::{Config, Publish, ScreenConfig};
 use mqtt::Publisher;
-use screen_state::{
-    ScreenState, error_refresh_target, resolve_index, resolve_tz, seconds_until,
-};
+use screen_state::{ScreenState, error_refresh_target, resolve_index, resolve_tz, seconds_until};
 
 struct Screen {
     config: ScreenConfig,
@@ -104,7 +102,9 @@ async fn main() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let config_path = std::env::args().nth(1).unwrap_or_else(|| "config.toml".to_string());
+    let config_path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "config.toml".to_string());
     let config = Config::from_file(&config_path)?;
     tracing::info!(path = %config_path, screens = config.screens.len(), "loaded config");
 
@@ -121,7 +121,12 @@ async fn main() -> anyhow::Result<()> {
             let album = AlbumClient::new(s.share_url.clone())?;
             let tz = resolve_tz(s.timezone.as_deref())?;
             let state = Mutex::new(ScreenState::fresh(s.rotate.as_ref(), &tz, now));
-            let screen = Screen { album, state, tz, config: s };
+            let screen = Screen {
+                album,
+                state,
+                tz,
+                config: s,
+            };
             Ok::<_, anyhow::Error>((screen.config.name.clone(), screen))
         })
         .collect::<anyhow::Result<_>>()?;
@@ -174,7 +179,9 @@ async fn screen_handler(
         async {
             let img = screen
                 .album
-                .pick(cfg.width, cfg.height, &cfg.fit, |n| resolve_index(seed, cursor, n))
+                .pick(cfg.width, cfg.height, &cfg.fit, |n| {
+                    resolve_index(seed, cursor, n)
+                })
                 .await?;
             background::apply(img, cfg.width, cfg.height, &cfg.background)
         },
@@ -229,20 +236,20 @@ async fn screen_handler(
                 publisher.publish(&name, "battery_pct", v);
             }
         }
-        if cfg.publish.contains(&Publish::Temperature) {
-            if let Some(v) = q.temperature_c {
-                publisher.publish(&name, "temperature", v);
-            }
+        if cfg.publish.contains(&Publish::Temperature)
+            && let Some(v) = q.temperature_c
+        {
+            publisher.publish(&name, "temperature", v);
         }
-        if cfg.publish.contains(&Publish::Humidity) {
-            if let Some(v) = q.humidity_pct {
-                publisher.publish(&name, "humidity", v);
-            }
+        if cfg.publish.contains(&Publish::Humidity)
+            && let Some(v) = q.humidity_pct
+        {
+            publisher.publish(&name, "humidity", v);
         }
-        if cfg.publish.contains(&Publish::Power) {
-            if let Some(v) = q.power {
-                publisher.publish(&name, "power", v);
-            }
+        if cfg.publish.contains(&Publish::Power)
+            && let Some(v) = q.power
+        {
+            publisher.publish(&name, "power", v);
         }
         if cfg.publish.contains(&Publish::LastSeen) {
             publisher.publish(&name, "last_seen", now.to_rfc3339());
@@ -292,7 +299,12 @@ async fn screen_handler(
     // (degraded image) we use error_refresh instead, capped against the
     // normal next-fetch target so we don't push past it.
     let target = if degraded {
-        Some(error_refresh_target(cfg.error_refresh, cfg.wake_delay, next_rotation, now))
+        Some(error_refresh_target(
+            cfg.error_refresh,
+            cfg.wake_delay,
+            next_rotation,
+            now,
+        ))
     } else {
         next_rotation.map(|n| n + chrono::Duration::from_std(cfg.wake_delay).unwrap_or_default())
     };
@@ -303,10 +315,17 @@ async fn screen_handler(
     response
 }
 
-fn set_refresh_header(response: &mut Response, target: DateTime<Utc>, now: DateTime<Utc>, path: &str) {
+fn set_refresh_header(
+    response: &mut Response,
+    target: DateTime<Utc>,
+    now: DateTime<Utc>,
+    path: &str,
+) {
     if let Ok(hv) = HeaderValue::from_str(&format!("{}; url={}", seconds_until(target, now), path))
     {
-        response.headers_mut().insert(HeaderName::from_static("refresh"), hv);
+        response
+            .headers_mut()
+            .insert(HeaderName::from_static("refresh"), hv);
     }
 }
 
