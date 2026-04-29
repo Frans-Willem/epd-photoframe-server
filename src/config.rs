@@ -459,11 +459,10 @@ pub enum Strategy {
     OctahedronFurthest,
     NaiveMix,
     NaiveDominant,
-    /// 1-D grayscale, no spread (`PureSpreadGrayDecomposer` with
-    /// `spread_ratio = 0`). Requires a grayscale `dither_palette`.
-    Grayscale,
-    /// 1-D grayscale with a pure-spread ratio in `[0, 1]`. Encoded as
-    /// `gray-pure-spread:<r>` in TOML. Requires a grayscale `dither_palette`.
+    /// 1-D grayscale via `PureSpreadGrayDecomposer`. The bare TOML string
+    /// `"grayscale"` parses to `GrayPureSpread(0.0)` (no-spread shorthand);
+    /// `"gray-pure-spread:<r>"` parses to `GrayPureSpread(r)` with `r` in
+    /// `[0, 1]`. Requires a grayscale `dither_palette`.
     GrayPureSpread(f32),
 }
 
@@ -471,22 +470,21 @@ impl FromStr for Strategy {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Some(rest) = s.strip_prefix("gray-pure-spread:") {
+            let r: f32 = rest
+                .parse()
+                .map_err(|_| format!("invalid spread ratio in `{s}`"))?;
+            if !(0.0..=1.0).contains(&r) {
+                return Err(format!("spread ratio {r} out of range [0.0, 1.0]"));
+            }
+            return Ok(Self::GrayPureSpread(r));
+        }
         match s {
             "octahedron-closest" => Ok(Self::OctahedronClosest),
             "octahedron-furthest" => Ok(Self::OctahedronFurthest),
             "naive-mix" => Ok(Self::NaiveMix),
             "naive-dominant" => Ok(Self::NaiveDominant),
-            "grayscale" => Ok(Self::Grayscale),
-            _ if s.starts_with("gray-pure-spread:") => {
-                let rest = &s["gray-pure-spread:".len()..];
-                let r: f32 = rest
-                    .parse()
-                    .map_err(|_| format!("invalid spread ratio in `{s}`"))?;
-                if !(0.0..=1.0).contains(&r) {
-                    return Err(format!("spread ratio {r} out of range [0.0, 1.0]"));
-                }
-                Ok(Self::GrayPureSpread(r))
-            }
+            "grayscale" => Ok(Self::GrayPureSpread(0.0)),
             _ => Err(format!("unknown strategy `{s}`")),
         }
     }
@@ -577,7 +575,7 @@ pub struct DitherConfig {
 /// `output_palette` is specified in TOML.
 fn default_palette_for(strategy: &Strategy) -> Palette {
     match strategy {
-        Strategy::Grayscale | Strategy::GrayPureSpread(_) => Palette::Grayscale4,
+        Strategy::GrayPureSpread(_) => Palette::Grayscale4,
         _ => Palette::Spectra6,
     }
 }
@@ -735,7 +733,21 @@ mod tests {
             Ok(Strategy::OctahedronClosest)
         ));
         assert!(matches!("naive-mix".parse(), Ok(Strategy::NaiveMix)));
-        assert!(matches!("grayscale".parse(), Ok(Strategy::Grayscale)));
+    }
+
+    #[test]
+    fn strategy_grayscale_parses_to_zero_spread() {
+        // "grayscale" is sugar for gray-pure-spread:0.0; both should produce
+        // the same canonical variant.
+        let bare = "grayscale".parse::<Strategy>().unwrap();
+        let explicit = "gray-pure-spread:0.0".parse::<Strategy>().unwrap();
+        match (bare, explicit) {
+            (Strategy::GrayPureSpread(a), Strategy::GrayPureSpread(b)) => {
+                assert_eq!(a, 0.0);
+                assert_eq!(b, 0.0);
+            }
+            other => panic!("expected both to parse to GrayPureSpread, got {other:?}"),
+        }
     }
 
     #[test]

@@ -13,6 +13,7 @@ use rand::prelude::*;
 use crate::config::{DitherConfig, NoiseSource, Strategy};
 
 /// Smallest indexed PNG bit depth that can hold `palette_size` distinct indices.
+/// `BitDepth as u8` is the bits-per-pixel value for the same enum.
 fn bit_depth_for(palette_size: usize) -> BitDepth {
     match palette_size {
         0..=2 => BitDepth::One,
@@ -20,11 +21,6 @@ fn bit_depth_for(palette_size: usize) -> BitDepth {
         5..=16 => BitDepth::Four,
         _ => BitDepth::Eight,
     }
-}
-
-/// Number of bits each pixel occupies for a given PNG bit depth.
-fn bits_per_pixel(depth: BitDepth) -> u8 {
-    depth as u8
 }
 
 fn color_to_point(color: Rgb<u8>) -> Point3<f32> {
@@ -72,25 +68,20 @@ fn grayscale_levels(palette: &[Rgb<u8>]) -> anyhow::Result<Vec<f32>> {
 /// indexed-PNG byte layout (each scanline byte-aligned). Pre-allocated to the
 /// packed size on construction.
 struct PackedIndexWriter {
-    width: usize,
     bits_per_pixel: u8,
+    bytes_per_row: usize,
     target: Vec<u8>,
 }
 
 impl PackedIndexWriter {
     fn new(width: usize, height: usize, bits_per_pixel: u8) -> Self {
         let px_per_byte = 8 / bits_per_pixel as usize;
-        let row_bytes = width.div_ceil(px_per_byte);
+        let bytes_per_row = width.div_ceil(px_per_byte);
         Self {
-            width,
             bits_per_pixel,
-            target: vec![0u8; row_bytes * height],
+            bytes_per_row,
+            target: vec![0u8; bytes_per_row * height],
         }
-    }
-
-    fn row_bytes(&self) -> usize {
-        let px_per_byte = 8 / self.bits_per_pixel as usize;
-        self.width.div_ceil(px_per_byte)
     }
 }
 
@@ -98,25 +89,20 @@ impl ImageWriter<usize> for PackedIndexWriter {
     fn put_pixel(&mut self, x: usize, y: usize, pixel: usize) {
         let bpp = self.bits_per_pixel as usize;
         let px_per_byte = 8 / bpp;
-        let row_bytes = self.row_bytes();
         let byte_x = x / px_per_byte;
         // MSB-first: the leftmost pixel occupies the highest bits.
         let shift = (px_per_byte - 1 - (x % px_per_byte)) * bpp;
         let mask = ((1u32 << bpp) - 1) as u8;
-        let byte = &mut self.target[y * row_bytes + byte_x];
+        let byte = &mut self.target[y * self.bytes_per_row + byte_x];
         *byte = (*byte & !(mask << shift)) | (((pixel as u8) & mask) << shift);
     }
 }
 
 /// Dither `img` and return an indexed PNG at the image's own dimensions.
 pub fn process(img: RgbImage, config: &DitherConfig) -> anyhow::Result<Vec<u8>> {
-    let palette_points: Vec<Point3<f32>> = config
-        .dither_palette
-        .colors()
-        .iter()
-        .copied()
-        .map(color_to_point)
-        .collect();
+    let dither_palette = config.dither_palette.colors();
+    let palette_points: Vec<Point3<f32>> =
+        dither_palette.iter().copied().map(color_to_point).collect();
 
     let noise = config.noise.clone();
     let noise_fn = move |x: usize, y: usize| -> Option<f32> {
@@ -133,11 +119,10 @@ pub fn process(img: RgbImage, config: &DitherConfig) -> anyhow::Result<Vec<u8>> 
 
     let (width, height) = (img.width() as usize, img.height() as usize);
     let bit_depth = bit_depth_for(palette_points.len());
-    let bpp = bits_per_pixel(bit_depth);
     let mut inout = PaletteDitheringWithNoise {
         image: img,
         noise_fn,
-        writer: PackedIndexWriter::new(width, height, bpp),
+        writer: PackedIndexWriter::new(width, height, bit_depth as u8),
     };
     let matrix = config.diffuse.to_boxed_matrix();
 
@@ -186,13 +171,8 @@ pub fn process(img: RgbImage, config: &DitherConfig) -> anyhow::Result<Vec<u8>> 
                 true,
             );
         }
-        Strategy::Grayscale | Strategy::GrayPureSpread(_) => {
-            let spread = match config.strategy {
-                Strategy::Grayscale => 0.0,
-                Strategy::GrayPureSpread(r) => r,
-                _ => unreachable!(),
-            };
-            let levels = grayscale_levels(config.dither_palette.colors().as_slice())?;
+        Strategy::GrayPureSpread(spread) => {
+            let levels = grayscale_levels(&dither_palette)?;
             let decomposer = PureSpreadGrayDecomposer::new(levels)
                 .ok_or_else(|| anyhow::anyhow!("failed to build PureSpreadGrayDecomposer"))?
                 .with_spread_ratio(spread);
