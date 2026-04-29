@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use anyhow::Context;
 use chrono::{DateTime, Offset, Utc};
 use chrono_tz::Tz;
@@ -122,6 +124,27 @@ pub fn seconds_until(target: DateTime<Utc>, now: DateTime<Utc>) -> i64 {
     }
 }
 
+/// The absolute moment at which an error response should ask the device to
+/// retry. Base is `now + error_refresh`, but never later than the device's
+/// normal next-fetch target (`next_rotation + wake_delay`) — pushing past
+/// that would have the device skip a scheduled rotation. With no rotation
+/// schedule the cap doesn't apply.
+pub fn error_refresh_target(
+    error_refresh: Duration,
+    wake_delay: Duration,
+    next_rotation: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> DateTime<Utc> {
+    let base = now + chrono::Duration::from_std(error_refresh).unwrap_or_default();
+    match next_rotation {
+        Some(n) => {
+            let cap = n + chrono::Duration::from_std(wake_delay).unwrap_or_default();
+            base.min(cap)
+        }
+        None => base,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,4 +228,38 @@ mod tests {
         assert_eq!(seconds_until(now - chrono::Duration::seconds(5), now), 0);
     }
 
+    #[test]
+    fn error_refresh_target_no_schedule_uses_base() {
+        let now = Utc::now();
+        let t = error_refresh_target(Duration::from_secs(3600), Duration::ZERO, None, now);
+        assert_eq!(t, now + chrono::Duration::seconds(3600));
+    }
+
+    #[test]
+    fn error_refresh_target_clamps_to_wake_target_when_sooner() {
+        let now = Utc::now();
+        // Next rotation in 10 min, wake_delay 5 min → cap is 15 min.
+        let next_rotation = now + chrono::Duration::seconds(600);
+        let t = error_refresh_target(
+            Duration::from_secs(3600), // would-be 1 h
+            Duration::from_secs(300),
+            Some(next_rotation),
+            now,
+        );
+        assert_eq!(t, next_rotation + chrono::Duration::seconds(300));
+    }
+
+    #[test]
+    fn error_refresh_target_uses_base_when_wake_target_is_later() {
+        let now = Utc::now();
+        // Next rotation in 6 h → 1 h error_refresh wins.
+        let next_rotation = now + chrono::Duration::hours(6);
+        let t = error_refresh_target(
+            Duration::from_secs(3600),
+            Duration::ZERO,
+            Some(next_rotation),
+            now,
+        );
+        assert_eq!(t, now + chrono::Duration::seconds(3600));
+    }
 }

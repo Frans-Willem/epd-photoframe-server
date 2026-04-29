@@ -77,6 +77,14 @@ pub struct ScreenConfig {
     /// humantime string, e.g. `"30s"`, `"15m"`, `"1h 30m"`. Defaults to zero.
     #[serde(default, deserialize_with = "deserialize_duration")]
     pub wake_delay: Duration,
+    /// How long to ask the device to wait before retrying after a failed or
+    /// partial render. Used as the Refresh-header value for both soft-failure
+    /// (placeholder image) and hard-failure (HTTP 500) responses, clamped
+    /// against `next_rotation + wake_delay` (the device's normal next-fetch
+    /// target) so it never extends past one. Same humantime format as
+    /// `wake_delay`. Defaults to `"1h"`.
+    #[serde(default = "default_error_refresh", deserialize_with = "deserialize_duration")]
+    pub error_refresh: Duration,
     /// IANA timezone name (e.g. `Europe/Amsterdam`) used for rotation
     /// scheduling and the infobox. Defaults to the system timezone.
     #[serde(default)]
@@ -110,6 +118,10 @@ pub enum Publish {
 
 fn default_publish() -> HashSet<Publish> {
     [Publish::Battery, Publish::LastSeen].into_iter().collect()
+}
+
+fn default_error_refresh() -> Duration {
+    Duration::from_secs(3600)
 }
 
 fn deserialize_duration<'de, D>(d: D) -> Result<Duration, D::Error>
@@ -534,6 +546,8 @@ mod tests {
         assert!(matches!(cfg.screens[1].rotate, Some(Rotate::Natural(_))));
         assert_eq!(cfg.screens[0].wake_delay, Duration::from_secs(3600));
         assert_eq!(cfg.screens[1].wake_delay, Duration::ZERO);
+        // bedroom screen uses the default (1h); living-room sets it explicitly.
+        assert_eq!(cfg.screens[1].error_refresh, Duration::from_secs(3600));
     }
 
     #[test]

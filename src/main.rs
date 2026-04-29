@@ -2,6 +2,7 @@ mod album;
 mod background;
 mod battery_indicator;
 mod config;
+mod degraded;
 mod dither;
 mod infobox;
 mod mqtt;
@@ -12,6 +13,7 @@ mod weather;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use axum::{
@@ -21,7 +23,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use reqwest::Client;
 use serde::Deserialize;
@@ -30,7 +32,9 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use album::AlbumClient;
 use config::{Config, Publish, ScreenConfig};
 use mqtt::Publisher;
-use screen_state::{ScreenState, resolve_index, resolve_tz, seconds_until};
+use screen_state::{
+    ScreenState, error_refresh_target, resolve_index, resolve_tz, seconds_until,
+};
 
 struct Screen {
     config: ScreenConfig,
@@ -144,11 +148,10 @@ async fn screen_handler(
     Query(q): Query<ScreenQuery>,
     OriginalUri(uri): OriginalUri,
     State(state): State<AppState>,
-) -> Result<Response, AppError> {
-    let screen = state
-        .screens
-        .get(&name)
-        .ok_or_else(|| AppError::NotFound(format!("screen `{name}` not found")))?;
+) -> Response {
+    let Some(screen) = state.screens.get(&name) else {
+        return (StatusCode::NOT_FOUND, format!("screen `{name}` not found")).into_response();
+    };
 
     let now = Utc::now();
     let (seed, cursor, next_rotation) = {
@@ -164,16 +167,53 @@ async fn screen_handler(
 
     tracing::info!(screen = %name, ?q.action, seed, cursor, "fetching image");
     let cfg = &screen.config;
-    let img = screen
-        .album
-        .pick(cfg.width, cfg.height, &cfg.fit, |n| {
-            resolve_index(seed, cursor, n)
-        })
-        .await?;
-    let mut img = background::apply(img, cfg.width, cfg.height, &cfg.background)?;
+    let mut degraded = false;
+
+    // Photo and weather are independent network round-trips — fire concurrently.
+    let (image_result, weather_result) = tokio::join!(
+        async {
+            let img = screen
+                .album
+                .pick(cfg.width, cfg.height, &cfg.fit, |n| resolve_index(seed, cursor, n))
+                .await?;
+            background::apply(img, cfg.width, cfg.height, &cfg.background)
+        },
+        async {
+            match cfg.infobox.as_ref() {
+                Some(ibox) => weather::daily(
+                    &state.http,
+                    ibox.latitude,
+                    ibox.longitude,
+                    screen.tz.name(),
+                    ibox.units,
+                )
+                .await
+                .map(Some),
+                None => Ok(None),
+            }
+        },
+    );
+
+    let mut img = match image_result {
+        Ok(img) => img,
+        Err(e) => {
+            tracing::warn!(screen = %name, error = %format!("{e:#}"), "image fetch failed; rendering placeholder");
+            degraded = true;
+            degraded::placeholder(cfg.width, cfg.height, &cfg.background, &format!("{e:#}"))
+        }
+    };
+
+    let weather = match weather_result {
+        Ok(w) => w,
+        Err(e) => {
+            tracing::warn!(screen = %name, error = %format!("{e:#}"), "weather fetch failed; infobox will show error");
+            degraded = true;
+            None
+        }
+    };
 
     if let Some(infobox_cfg) = &cfg.infobox {
-        infobox::apply(&mut img, infobox_cfg, &screen.tz, &state.http).await?;
+        infobox::apply(&mut img, infobox_cfg, &screen.tz, weather);
     }
 
     if let (Some(indicator_cfg), Some(pct)) = (&cfg.battery_indicator, q.battery_pct) {
@@ -209,12 +249,36 @@ async fn screen_handler(
         }
     }
 
-    let png = tokio::task::spawn_blocking({
+    let png = match tokio::task::spawn_blocking({
         let dither_cfg = cfg.dither.clone();
         move || dither::process(img, &dither_cfg)
     })
     .await
-    .map_err(|e| anyhow::anyhow!("dither task panicked: {e}"))??;
+    {
+        Ok(Ok(png)) => png,
+        Ok(Err(e)) => {
+            tracing::error!(screen = %name, error = %format!("{e:#}"), "dither failed");
+            return error_response_with_refresh(
+                format!("dither failed: {e:#}"),
+                cfg.error_refresh,
+                cfg.wake_delay,
+                next_rotation,
+                now,
+                uri.path(),
+            );
+        }
+        Err(e) => {
+            tracing::error!(screen = %name, error = %e, "dither task panicked");
+            return error_response_with_refresh(
+                format!("dither task panicked: {e}"),
+                cfg.error_refresh,
+                cfg.wake_delay,
+                next_rotation,
+                now,
+                uri.path(),
+            );
+        }
+    };
 
     let mut response = png.into_response();
     response
@@ -222,44 +286,40 @@ async fn screen_handler(
         .insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
 
     // Tell the client when to come back; URL strips query params so a next/
-    // previous action doesn't repeat on auto-refresh. wake_delay pushes the
-    // target past the scheduled rotation so early client-clock drift still
-    // lands on the new image; seconds_until rounds up to the next whole second.
-    if let Some(next) = next_rotation {
-        let target = next + chrono::Duration::from_std(cfg.wake_delay).unwrap_or_default();
-        if let Ok(hv) =
-            HeaderValue::from_str(&format!("{}; url={}", seconds_until(target, now), uri.path()))
-        {
-            response
-                .headers_mut()
-                .insert(HeaderName::from_static("refresh"), hv);
-        }
+    // previous action doesn't repeat on auto-refresh. On a successful render
+    // wake_delay pushes the target past the scheduled rotation so early
+    // client-clock drift still lands on the new image. On a soft failure
+    // (degraded image) we use error_refresh instead, capped against the
+    // normal next-fetch target so we don't push past it.
+    let target = if degraded {
+        Some(error_refresh_target(cfg.error_refresh, cfg.wake_delay, next_rotation, now))
+    } else {
+        next_rotation.map(|n| n + chrono::Duration::from_std(cfg.wake_delay).unwrap_or_default())
+    };
+    if let Some(target) = target {
+        set_refresh_header(&mut response, target, now, uri.path());
     }
 
-    Ok(response)
+    response
 }
 
-// --- Error handling ---
-
-enum AppError {
-    NotFound(String),
-    Internal(anyhow::Error),
-}
-
-impl<E: Into<anyhow::Error>> From<E> for AppError {
-    fn from(e: E) -> Self {
-        Self::Internal(e.into())
+fn set_refresh_header(response: &mut Response, target: DateTime<Utc>, now: DateTime<Utc>, path: &str) {
+    if let Ok(hv) = HeaderValue::from_str(&format!("{}; url={}", seconds_until(target, now), path))
+    {
+        response.headers_mut().insert(HeaderName::from_static("refresh"), hv);
     }
 }
 
-impl IntoResponse for AppError {
-    fn into_response(self) -> Response {
-        match self {
-            Self::NotFound(msg) => (StatusCode::NOT_FOUND, msg).into_response(),
-            Self::Internal(e) => {
-                tracing::error!(error = %e, "internal error");
-                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
-            }
-        }
-    }
+fn error_response_with_refresh(
+    body: String,
+    error_refresh: Duration,
+    wake_delay: Duration,
+    next_rotation: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+    path: &str,
+) -> Response {
+    let mut response = (StatusCode::INTERNAL_SERVER_ERROR, body).into_response();
+    let target = error_refresh_target(error_refresh, wake_delay, next_rotation, now);
+    set_refresh_header(&mut response, target, now, path);
+    response
 }

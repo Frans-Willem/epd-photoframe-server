@@ -38,6 +38,30 @@ percent of the interval (so roughly 15–60 min for a daily rotation, a
 few seconds for a 5-minute rotation). The default is zero; the device
 is then told to wake exactly at the scheduled rotation.
 
+## `error_refresh`
+
+If the photo can't be fetched (Google Photos unreachable, share URL
+broken, decode error, etc.) the server returns a real PNG instead of
+HTTP 500: a placeholder image filled with the configured `background`
+colour, the heading "Failed to fetch image" centred on it, and the
+underlying error rendered in smaller text below. The optional infobox
+and battery indicator still draw on top, so a degraded image shows
+the date/time/weather you'd otherwise miss.
+
+If the *weather* fetch fails but the photo succeeded, the photo is
+returned unchanged but the infobox renders "Weather error" with the
+`wi-na` icon in place of the temperature line.
+
+In both soft-failure cases — and on a hard HTTP 500 (dither failure
+or task panic) — the response carries a `Refresh` header set to
+`error_refresh` from now (default `"1h"`), capped against the
+device's normal next-fetch target (`next_rotation + wake_delay`) so
+it never extends past one. This prevents tight retry loops on the
+device while still recovering faster than the normal rotation cadence.
+
+The full `anyhow::Error` (with cause chain) goes to the server log at
+`warn`/`error` regardless of which path fired.
+
 ## `battery_indicator`
 
 If the device passes a `battery_pct` query parameter on its request

@@ -54,6 +54,14 @@ rotate.cron = "0 0 2,14 * * *"
 # two wakes when the device fires slightly early. Accepts humantime strings
 # like "30s", "15m", "1h 30m". Defaults to 0.
 wake_delay = "1h"
+# How long to ask the device to wait before retrying after a failed render.
+# On a soft failure (photo or weather fetch fails) the response is still a
+# valid PNG (placeholder + diagnostic text); on a hard failure (dither
+# panic) it's HTTP 500 text/plain. Either way the Refresh header points at
+# `error_refresh` from now, clamped against the device's normal next-fetch
+# target (`next_rotation + wake_delay`) so it never extends past one.
+# Defaults to "1h".
+error_refresh = "1h"
 # Per-screen MQTT publish list. Each entry creates one or more Home Assistant
 # sensors (all grouped under one Home Assistant device per screen). Defaults
 # to ["battery", "last_seen"]. Available values:
