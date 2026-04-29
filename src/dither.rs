@@ -1,4 +1,4 @@
-use epd_dither::decompose::gray::PureSpreadGrayDecomposer;
+use epd_dither::decompose::gray::{OffsetBlendGrayDecomposer, PureSpreadGrayDecomposer};
 use epd_dither::decompose::naive::{NaiveDecomposer, NaiveDecomposerStrategy};
 use epd_dither::decompose::octahedron::{OctahedronDecomposer, OctahedronDecomposerAxisStrategy};
 use epd_dither::dither::DecomposingDitherStrategy;
@@ -176,6 +176,18 @@ pub fn process(img: RgbImage, config: &DitherConfig) -> anyhow::Result<Vec<u8>> 
             let decomposer = PureSpreadGrayDecomposer::new(levels)
                 .ok_or_else(|| anyhow::anyhow!("failed to build PureSpreadGrayDecomposer"))?
                 .with_spread_ratio(spread);
+            diffuse_dither(
+                DecomposingDitherStrategy::new(decomposer, rgb_to_brightness),
+                matrix,
+                &mut inout,
+                true,
+            );
+        }
+        Strategy::GrayOffsetBlend(distance) => {
+            let levels = grayscale_levels(&dither_palette)?;
+            let decomposer = OffsetBlendGrayDecomposer::new(levels)
+                .ok_or_else(|| anyhow::anyhow!("failed to build OffsetBlendGrayDecomposer"))?
+                .with_distance(distance);
             diffuse_dither(
                 DecomposingDitherStrategy::new(decomposer, rgb_to_brightness),
                 matrix,

@@ -111,13 +111,15 @@ noise = "ign"                   # none | bayer | bayer:N | ign | white
 #       regular convex octahedron (e.g. spectra6, naive)
 #   naive-mix / naive-dominant — arbitrary 6-colour palettes (e.g. epdoptimize)
 #   grayscale — 1-D grayscale, no spread; needs a `grayscale*` dither_palette
-#   gray-pure-spread:<r> — same, with pure-spread ratio r in [0, 1]
+#   gray-pure-spread:<r>  — asymmetric mean-preserving spread, r in [0, 1]
+#   gray-offset-blend:<r> — symmetric blend of bracket decompositions of
+#       input ± r/2 (mean-preserving), r in [0, 1]
 strategy = "octahedron-closest"
 diffuse = "floyd-steinberg"     # none | floyd-steinberg | jarvis-judice-and-ninke | atkinson | sierra
 # Palettes. `dither_palette` is what the dither targets; `output_palette` is
 # what gets written into the PNG palette table. Naming one mirrors it to the
 # other; naming neither falls back to `spectra6` for colour strategies and
-# `grayscale4` for `grayscale` / `gray-pure-spread:*`. Set both explicitly
+# `grayscale4` for `grayscale` / `gray-*:*`. Set both explicitly
 # only when they should differ — see the bedroom screen below for the
 # epdoptimize-to-spectra6 case.
 #   naive | spectra6 | epdoptimize | grayscale2 | grayscale4 | grayscale16

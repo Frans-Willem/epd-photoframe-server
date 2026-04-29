@@ -459,32 +459,46 @@ pub enum Strategy {
     OctahedronFurthest,
     NaiveMix,
     NaiveDominant,
-    /// 1-D grayscale via `PureSpreadGrayDecomposer`. The bare TOML string
-    /// `"grayscale"` parses to `GrayPureSpread(0.0)` (no-spread shorthand);
-    /// `"gray-pure-spread:<r>"` parses to `GrayPureSpread(r)` with `r` in
-    /// `[0, 1]`. Requires a grayscale `dither_palette`.
+    /// 1-D grayscale via `PureSpreadGrayDecomposer`, parsed from
+    /// `"gray-pure-spread:<r>"` with `r` in `[0, 1]`. Requires a grayscale
+    /// `dither_palette`.
     GrayPureSpread(f32),
+    /// 1-D grayscale via `OffsetBlendGrayDecomposer`, parsed from
+    /// `"gray-offset-blend:<r>"` with `r` in `[0, 1]`. The bare TOML string
+    /// `"grayscale"` is shorthand for `GrayOffsetBlend(0.0)` — both
+    /// decomposers produce identical output at parameter = 0 (plain bracket
+    /// decomposition), but OffsetBlend takes its early-out path while
+    /// PureSpread still runs the full asymmetric-spread arithmetic.
+    GrayOffsetBlend(f32),
 }
 
 impl FromStr for Strategy {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if let Some(rest) = s.strip_prefix("gray-pure-spread:") {
-            let r: f32 = rest
-                .parse()
-                .map_err(|_| format!("invalid spread ratio in `{s}`"))?;
-            if !(0.0..=1.0).contains(&r) {
-                return Err(format!("spread ratio {r} out of range [0.0, 1.0]"));
+        for (prefix, ctor) in [
+            ("gray-pure-spread:", Self::GrayPureSpread as fn(f32) -> Self),
+            (
+                "gray-offset-blend:",
+                Self::GrayOffsetBlend as fn(f32) -> Self,
+            ),
+        ] {
+            if let Some(rest) = s.strip_prefix(prefix) {
+                let r: f32 = rest
+                    .parse()
+                    .map_err(|_| format!("invalid ratio in `{s}`"))?;
+                if !(0.0..=1.0).contains(&r) {
+                    return Err(format!("ratio {r} in `{s}` out of range [0.0, 1.0]"));
+                }
+                return Ok(ctor(r));
             }
-            return Ok(Self::GrayPureSpread(r));
         }
         match s {
             "octahedron-closest" => Ok(Self::OctahedronClosest),
             "octahedron-furthest" => Ok(Self::OctahedronFurthest),
             "naive-mix" => Ok(Self::NaiveMix),
             "naive-dominant" => Ok(Self::NaiveDominant),
-            "grayscale" => Ok(Self::GrayPureSpread(0.0)),
+            "grayscale" => Ok(Self::GrayOffsetBlend(0.0)),
             _ => Err(format!("unknown strategy `{s}`")),
         }
     }
@@ -575,7 +589,7 @@ pub struct DitherConfig {
 /// `output_palette` is specified in TOML.
 fn default_palette_for(strategy: &Strategy) -> Palette {
     match strategy {
-        Strategy::GrayPureSpread(_) => Palette::Grayscale4,
+        Strategy::GrayPureSpread(_) | Strategy::GrayOffsetBlend(_) => Palette::Grayscale4,
         _ => Palette::Spectra6,
     }
 }
@@ -736,17 +750,18 @@ mod tests {
     }
 
     #[test]
-    fn strategy_grayscale_parses_to_zero_spread() {
-        // "grayscale" is sugar for gray-pure-spread:0.0; both should produce
-        // the same canonical variant.
+    fn strategy_grayscale_canonicalises_to_offset_blend_zero() {
+        // "grayscale" is sugar for gray-offset-blend:0.0 (matches upstream
+        // routing — OffsetBlend has an early-out at distance=0 while
+        // PureSpread still runs full arithmetic at spread=0).
         let bare = "grayscale".parse::<Strategy>().unwrap();
-        let explicit = "gray-pure-spread:0.0".parse::<Strategy>().unwrap();
+        let explicit = "gray-offset-blend:0.0".parse::<Strategy>().unwrap();
         match (bare, explicit) {
-            (Strategy::GrayPureSpread(a), Strategy::GrayPureSpread(b)) => {
+            (Strategy::GrayOffsetBlend(a), Strategy::GrayOffsetBlend(b)) => {
                 assert_eq!(a, 0.0);
                 assert_eq!(b, 0.0);
             }
-            other => panic!("expected both to parse to GrayPureSpread, got {other:?}"),
+            other => panic!("expected both to parse to GrayOffsetBlend, got {other:?}"),
         }
     }
 
@@ -759,10 +774,20 @@ mod tests {
     }
 
     #[test]
-    fn strategy_rejects_out_of_range_spread() {
+    fn strategy_parses_gray_offset_blend() {
+        match "gray-offset-blend:0.5".parse::<Strategy>() {
+            Ok(Strategy::GrayOffsetBlend(r)) => assert!((r - 0.5).abs() < 1e-6),
+            other => panic!("expected GrayOffsetBlend(0.5), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn strategy_rejects_out_of_range_ratio() {
         assert!("gray-pure-spread:1.5".parse::<Strategy>().is_err());
         assert!("gray-pure-spread:-0.1".parse::<Strategy>().is_err());
         assert!("gray-pure-spread:nope".parse::<Strategy>().is_err());
+        assert!("gray-offset-blend:1.5".parse::<Strategy>().is_err());
+        assert!("gray-offset-blend:-0.1".parse::<Strategy>().is_err());
         assert!("gray-banana".parse::<Strategy>().is_err());
     }
 
