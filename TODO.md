@@ -37,3 +37,33 @@ Worth doing per-panel-type (E1002 vs E1004) since they're different
 Spectra 6 modules and may ship with slightly different pigment
 balances; possibly even per-unit if variance between two E1002s
 turns out to matter.
+
+## Run cargo clippy and rustfmt
+The tree currently has six pre-existing `clippy::collapsible_if`
+warnings in `src/main.rs` — back-to-back forms like
+`if cfg.publish.contains(&Publish::Power) { if let Some(v) = q.power
+{ … } }` that fold cleanly with `&& let` on the 2024 edition. Once
+those are tidied, run `cargo fmt` across the workspace and consider
+wiring `cargo fmt --check` and `cargo clippy --all-targets -- -D
+warnings` into a pre-push or CI step so new warnings surface
+immediately rather than accumulating into another sweep like this
+one.
+
+## action=refresh should refresh the album
+Today `?action=refresh` is a no-op (see the comment in
+`config.example.toml`: "?action=next / ?action=previous step the
+cursor within the current shuffle; ?action=refresh is a no-op").
+Make it a meaningful escape hatch: drop the cached album contents
+and any per-album share-page state for that screen, re-resolve the
+share URL, and render against the freshly-fetched list. Useful when
+a photo has just been added or removed in Google Photos and the
+user doesn't want to wait for the next scheduled rotation.
+
+## Track new photos across rotations
+Keep an in-memory per-album record of which photo IDs have been seen
+so we can detect newly-added photos. On each rotation (scheduled or
+`?action=refresh`-triggered), compare the current share contents
+against the seen set; if anything is new, position the cursor on a
+freshly-added photo rather than continuing the existing shuffle.
+No need to persist this to disk — the server is intended to run
+long-term, and forgetting the seen set on a restart is acceptable.
