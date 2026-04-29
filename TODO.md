@@ -1,22 +1,5 @@
 # TODO
 
-## Degrade to a partial image on soft failures
-
-Today a failure anywhere in the render pipeline means the device gets
-an error and no image. For some failures we can still produce something
-useful:
-
-- **Weather fetch fails:** render the photo normally, but print the
-  error text in the infobox instead of the weather line.
-- **Photo fetch/decode fails:** synthesize an image with the error
-  message as the content, and still render the infobox over it
-  (weather, time, etc.) so the device shows *something*.
-
-In either degraded case, shorten the next-refresh hint to
-`min(15 minutes, time until next scheduled rotate)` so we retry sooner
-than the normal rotation cadence without spamming on a cron like
-`*/5`.
-
 ## Calibrate the Spectra 6 palette against the actual panel
 
 Both palettes we dither against today — `spectra6` (the nominal sRGB
