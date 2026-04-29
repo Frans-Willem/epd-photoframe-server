@@ -77,23 +77,41 @@ threshold form is an approximation of the user-visible behaviour.
 
 ## MQTT / Home Assistant
 
-If the top-level `[mqtt]` section is present, the server forwards
-device-supplied query-string sensor values to a broker and announces
-them once on startup via Home Assistant's MQTT discovery protocol.
-Each screen becomes one HA *device*; the per-screen `publish_*` flags
-decide which sensors hang off it:
+If the top-level `[mqtt]` section is present, the server publishes
+device-supplied query-string sensor values to a broker on every
+request, and on startup also publishes one MQTT discovery config per
+enabled sensor so the values surface as proper entities. The state
+topics are plain MQTT and can be consumed by anything; the discovery
+configs follow Home Assistant's discovery convention, which has
+become the de-facto standard and is also consumed by openHAB,
+Domoticz, IoBroker, and others. Each screen becomes one Home
+Assistant *device*; the per-screen `publish` array picks which
+sensors hang off it (default `["battery", "last_seen"]`):
 
-| Flag | Query params consumed | HA sensors |
-|---|---|---|
-| `publish_battery` (default `true`)  | `battery_mv`, `battery_pct` | Battery voltage (mV, `voltage` class), Battery (%, `battery` class) |
-| `publish_temperature` (default false) | `temp_c`                     | Temperature (°C, `temperature` class) |
-| `publish_humidity` (default false)    | `humidity_pct`               | Humidity (%, `humidity` class) |
-| `publish_power` (default false)       | `power`                      | Power (`enum` class, options `battery` / `charging` / `full` / `fault`) |
+| Entry         | Query params consumed | Home Assistant sensors |
+|---------------|-----------------------|------------------------|
+| `battery`     | `battery_mv`, `battery_pct` | Battery voltage (mV, `voltage` class), Battery (%, `battery` class) |
+| `temperature` | `temp_c`              | Temperature (°C, `temperature` class) |
+| `humidity`    | `humidity_pct`        | Humidity (%, `humidity` class) |
+| `power`       | `power`               | Power (`enum` class, options `battery` / `charging` / `full` / `fault`) |
+| `last_seen`   | (none — server clock) | Last seen (`timestamp` class, RFC 3339 written on every request) |
+
+`last_seen` is independent of any device sensor — the server publishes
+its own wall-clock at request time, so it works as a heartbeat even
+for screens with no other sensors enabled. Duplicate entries in the
+TOML array are silently collapsed.
+
+The optional per-screen `mqtt_name` overrides the human label sent in
+the discovery payload (Home Assistant uses it as the device name and
+prefixes it onto each entity name). It defaults to the URL-friendly
+`name`, which is rarely the label you want in Home Assistant — set
+e.g. `name = "living-room"`, `mqtt_name = "Photoframe Livingroom"`.
 
 Discovery topic: `<discovery_prefix>/sensor/epd_photoframe_<slug>/<key>/config`,
 state topic: `<state_prefix>/<screen>/<key>` — where `<slug>` lowercases
-the screen name and replaces non-alphanumerics with `_` (HA's `node_id`
-restriction), while the state-topic uses the original screen name.
+the screen name and replaces non-alphanumerics with `_` (Home
+Assistant's `node_id` restriction), while the state-topic uses the
+original screen name.
 A request like
 
 ```

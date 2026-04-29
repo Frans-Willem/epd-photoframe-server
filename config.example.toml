@@ -13,6 +13,10 @@
 
 [[screens]]
 name = "living-room"
+# Optional human-readable label published over MQTT (used as the Home
+# Assistant device name and prefixed onto each entity name). Defaults to
+# `name` — set this when the URL slug isn't a nice label.
+mqtt_name = "Photoframe Livingroom"
 width = 800
 height = 480
 # Create a public shared album in Google Photos, copy the share link here.
@@ -50,14 +54,16 @@ rotate.cron = "0 0 2,14 * * *"
 # two wakes when the device fires slightly early. Accepts humantime strings
 # like "30s", "15m", "1h 30m". Defaults to 0.
 wake_delay = "1h"
-# Per-screen MQTT publish flags. Each maps a query parameter the device may
-# send to a Home Assistant sensor (grouped under one HA device per screen).
-# `publish_battery` defaults to true (covering both `?battery_mv=` and
-# `?battery_pct=` as separate sensors); the others default to false.
-publish_battery = true
-publish_temperature = true       # device sends `?temp_c=…`
-publish_humidity = true          # device sends `?humidity_pct=…`
-publish_power = true             # device sends `?power=battery|charging|full|fault`
+# Per-screen MQTT publish list. Each entry creates one or more Home Assistant
+# sensors (all grouped under one Home Assistant device per screen). Defaults
+# to ["battery", "last_seen"]. Available values:
+#   battery     — both `?battery_mv=` and `?battery_pct=` (two sensors)
+#   temperature — `?temp_c=` as a temperature sensor (°C)
+#   humidity    — `?humidity_pct=` as a humidity sensor (%)
+#   power       — `?power=battery|charging|full|fault` as an enum sensor
+#   last_seen   — server-side request timestamp (Home Assistant `timestamp`
+#                 device class)
+publish = ["battery", "temperature", "humidity", "power", "last_seen"]
 
 # Optional info overlay — day of week, date, weather.
 [screens.infobox]

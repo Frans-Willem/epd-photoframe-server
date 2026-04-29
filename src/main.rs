@@ -28,7 +28,7 @@ use serde::Deserialize;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use album::AlbumClient;
-use config::{Config, ScreenConfig};
+use config::{Config, Publish, ScreenConfig};
 use mqtt::Publisher;
 use screen_state::{ScreenState, resolve_index, resolve_tz, seconds_until};
 
@@ -181,7 +181,7 @@ async fn screen_handler(
     }
 
     if let Some(publisher) = &state.mqtt {
-        if cfg.publish_battery {
+        if cfg.publish.contains(&Publish::Battery) {
             if let Some(v) = q.battery_mv {
                 publisher.publish(&name, "battery_mv", v);
             }
@@ -189,20 +189,23 @@ async fn screen_handler(
                 publisher.publish(&name, "battery_pct", v);
             }
         }
-        if cfg.publish_temperature {
+        if cfg.publish.contains(&Publish::Temperature) {
             if let Some(v) = q.temperature_c {
                 publisher.publish(&name, "temperature", v);
             }
         }
-        if cfg.publish_humidity {
+        if cfg.publish.contains(&Publish::Humidity) {
             if let Some(v) = q.humidity_pct {
                 publisher.publish(&name, "humidity", v);
             }
         }
-        if cfg.publish_power {
+        if cfg.publish.contains(&Publish::Power) {
             if let Some(v) = q.power {
                 publisher.publish(&name, "power", v);
             }
+        }
+        if cfg.publish.contains(&Publish::LastSeen) {
+            publisher.publish(&name, "last_seen", now.to_rfc3339());
         }
     }
 

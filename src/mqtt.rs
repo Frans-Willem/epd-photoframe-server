@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use rumqttc::{AsyncClient, MqttOptions, QoS};
 
-use crate::config::{MqttConfig, ScreenConfig};
+use crate::config::{MqttConfig, Publish, ScreenConfig};
 
 #[derive(Clone)]
 pub struct Publisher {
@@ -21,13 +21,14 @@ struct Sensor {
     key: &'static str,
     /// Human-readable name shown in Home Assistant.
     name: &'static str,
-    /// HA `device_class`. For `enum` sensors this is the literal `"enum"`.
+    /// Home Assistant `device_class`. For `enum` sensors this is the literal
+    /// `"enum"`.
     device_class: &'static str,
-    /// Numeric sensors set this to `Some(unit)`; HA discovery then also gets
-    /// `state_class: "measurement"`.
+    /// Numeric sensors set this to `Some(unit)`; the Home Assistant discovery
+    /// payload then also gets `state_class: "measurement"`.
     unit: Option<&'static str>,
     /// Enum sensors (`device_class = "enum"`) list their permitted values
-    /// here so HA can validate states and show a chooser.
+    /// here so Home Assistant can validate states and show a chooser.
     options: Option<&'static [&'static str]>,
 }
 
@@ -66,27 +67,30 @@ const POWER: Sensor = Sensor {
     unit: None,
     options: Some(&["battery", "charging", "full", "fault"]),
 };
+const LAST_SEEN: Sensor = Sensor {
+    key: "last_seen",
+    name: "Last seen",
+    device_class: "timestamp",
+    unit: None,
+    options: None,
+};
 
 fn enabled_sensors(cfg: &ScreenConfig) -> Vec<Sensor> {
-    let mut s = Vec::with_capacity(5);
-    if cfg.publish_battery {
-        s.push(BATTERY_PCT);
-        s.push(BATTERY_MV);
-    }
-    if cfg.publish_temperature {
-        s.push(TEMPERATURE);
-    }
-    if cfg.publish_humidity {
-        s.push(HUMIDITY);
-    }
-    if cfg.publish_power {
-        s.push(POWER);
-    }
-    s
+    cfg.publish
+        .iter()
+        .flat_map(|p| match p {
+            Publish::Battery => &[BATTERY_PCT, BATTERY_MV][..],
+            Publish::Temperature => &[TEMPERATURE][..],
+            Publish::Humidity => &[HUMIDITY][..],
+            Publish::Power => &[POWER][..],
+            Publish::LastSeen => &[LAST_SEEN][..],
+        })
+        .copied()
+        .collect()
 }
 
-/// HA's discovery `node_id` and entity `unique_id` only allow `[a-z0-9_]`,
-/// so any other character in a screen name (e.g. the hyphen in
+/// Home Assistant's discovery `node_id` and entity `unique_id` only allow
+/// `[a-z0-9_]`, so any other character in a screen name (e.g. the hyphen in
 /// `living-room`) is mapped to `_`. Topics tolerate hyphens, so the
 /// state-topic uses the original screen name verbatim.
 fn slug(name: &str) -> String {
@@ -126,14 +130,15 @@ impl Publisher {
         };
         for screen in screens {
             for sensor in enabled_sensors(screen) {
-                publisher.publish_discovery(cfg, &screen.name, sensor);
+                publisher.publish_discovery(cfg, screen, sensor);
             }
         }
         publisher
     }
 
-    fn publish_discovery(&self, cfg: &MqttConfig, screen: &str, sensor: Sensor) {
-        let slug = slug(screen);
+    fn publish_discovery(&self, cfg: &MqttConfig, screen: &ScreenConfig, sensor: Sensor) {
+        let slug = slug(&screen.name);
+        let device_name = screen.mqtt_name.as_deref().unwrap_or(&screen.name);
         let topic = format!(
             "{}/sensor/epd_photoframe_{}/{}/config",
             cfg.discovery_prefix, slug, sensor.key
@@ -141,11 +146,11 @@ impl Publisher {
         let mut payload = serde_json::json!({
             "name": sensor.name,
             "unique_id": format!("epd_photoframe_{}_{}", slug, sensor.key),
-            "state_topic": format!("{}/{}/{}", self.state_prefix, screen, sensor.key),
+            "state_topic": format!("{}/{}/{}", self.state_prefix, screen.name, sensor.key),
             "device_class": sensor.device_class,
             "device": {
                 "identifiers": [format!("epd_photoframe_{}", slug)],
-                "name": screen,
+                "name": device_name,
                 "manufacturer": "epd-photoframe-server",
                 "model": "ePaper photo frame",
             },
@@ -188,43 +193,52 @@ mod tests {
         assert_eq!(slug("plain"), "plain");
     }
 
-    fn screen_with(battery: bool, temp: bool, humidity: bool, power: bool) -> ScreenConfig {
+    fn screen_with(publish: &str) -> ScreenConfig {
         toml::from_str(&format!(
             r#"
             name = "x"
             width = 800
             height = 480
             share_url = "https://example.com"
-            publish_battery = {battery}
-            publish_temperature = {temp}
-            publish_humidity = {humidity}
-            publish_power = {power}
+            publish = {publish}
             "#
         ))
         .unwrap()
     }
 
-    #[test]
-    fn enabled_sensors_battery_includes_both_mv_and_pct() {
-        let s = enabled_sensors(&screen_with(true, false, false, false));
-        let keys: Vec<_> = s.iter().map(|s| s.key).collect();
-        assert_eq!(keys, vec!["battery_pct", "battery_mv"]);
+    fn keys(s: &[Sensor]) -> std::collections::BTreeSet<&str> {
+        s.iter().map(|s| s.key).collect()
     }
 
     #[test]
-    fn enabled_sensors_all_off_produces_nothing() {
-        let s = enabled_sensors(&screen_with(false, false, false, false));
+    fn enabled_sensors_battery_includes_both_mv_and_pct() {
+        let s = enabled_sensors(&screen_with(r#"["battery"]"#));
+        assert_eq!(keys(&s), ["battery_pct", "battery_mv"].into_iter().collect());
+    }
+
+    #[test]
+    fn enabled_sensors_empty_publish_produces_nothing() {
+        let s = enabled_sensors(&screen_with("[]"));
         assert!(s.is_empty());
     }
 
     #[test]
-    fn enabled_sensors_all_on_produces_five() {
-        let s = enabled_sensors(&screen_with(true, true, true, true));
-        let keys: Vec<_> = s.iter().map(|s| s.key).collect();
+    fn enabled_sensors_all_on_produces_six() {
+        let s = enabled_sensors(&screen_with(
+            r#"["battery", "temperature", "humidity", "power", "last_seen"]"#,
+        ));
         assert_eq!(
-            keys,
-            vec!["battery_pct", "battery_mv", "temperature", "humidity", "power"]
+            keys(&s),
+            ["battery_pct", "battery_mv", "temperature", "humidity", "power", "last_seen"]
+                .into_iter()
+                .collect()
         );
+    }
+
+    #[test]
+    fn duplicate_publish_entries_collapse() {
+        let s = enabled_sensors(&screen_with(r#"["battery", "battery", "last_seen"]"#));
+        assert_eq!(keys(&s), ["battery_pct", "battery_mv", "last_seen"].into_iter().collect());
     }
 
     #[test]
@@ -232,5 +246,12 @@ mod tests {
         assert_eq!(POWER.device_class, "enum");
         assert!(POWER.unit.is_none());
         assert_eq!(POWER.options, Some(&["battery", "charging", "full", "fault"][..]));
+    }
+
+    #[test]
+    fn last_seen_sensor_is_a_timestamp_with_no_unit() {
+        assert_eq!(LAST_SEEN.device_class, "timestamp");
+        assert!(LAST_SEEN.unit.is_none());
+        assert!(LAST_SEEN.options.is_none());
     }
 }

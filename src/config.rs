@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::str::FromStr;
 use std::time::Duration;
 use tiny_skia::ColorU8;
@@ -7,9 +8,9 @@ use tiny_skia::ColorU8;
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
-    /// Optional MQTT broker. When present, screens with any `publish_*` flag
-    /// set will report their device-supplied sensor values (battery, etc.) and
-    /// emit Home Assistant discovery configs on startup.
+    /// Optional MQTT broker. When present, each screen's `publish` list
+    /// selects which device-supplied sensor values get forwarded; one Home
+    /// Assistant discovery config is emitted per enabled sensor on startup.
     #[serde(default)]
     pub mqtt: Option<MqttConfig>,
     pub screens: Vec<ScreenConfig>,
@@ -39,6 +40,12 @@ fn default_mqtt_state_prefix() -> String { "epd-photoframe".into() }
 #[derive(Debug, Deserialize)]
 pub struct ScreenConfig {
     pub name: String,
+    /// Human-readable label published over MQTT (used as the Home Assistant
+    /// device name and prefixed onto each entity name). Defaults to `name` —
+    /// set this when the URL slug isn't a nice label (e.g.
+    /// `name = "living-room"`, `mqtt_name = "Photoframe Livingroom"`).
+    #[serde(default)]
+    pub mqtt_name: Option<String>,
     pub width: u32,
     pub height: u32,
     /// Public Google Photos album share URL (e.g. `https://photos.app.goo.gl/...`
@@ -76,23 +83,34 @@ pub struct ScreenConfig {
     pub timezone: Option<String>,
     #[serde(default)]
     pub dither: DitherConfig,
-    /// Forward `?battery_mv=` and `?battery_pct=` to MQTT (one HA sensor each).
-    /// Defaults to `true` — every device is expected to have a battery; set
-    /// to `false` to suppress.
-    #[serde(default = "yes")]
-    pub publish_battery: bool,
-    /// Forward `?temp_c=` to MQTT as a temperature sensor.
-    #[serde(default)]
-    pub publish_temperature: bool,
-    /// Forward `?humidity_pct=` to MQTT as a humidity sensor.
-    #[serde(default)]
-    pub publish_humidity: bool,
-    /// Forward `?power=battery|charging|full|fault` to MQTT as an enum sensor.
-    #[serde(default)]
-    pub publish_power: bool,
+    /// Sensors to forward to MQTT for this screen. Each entry maps to one or
+    /// two Home Assistant sensors (battery covers both `battery_pct` and
+    /// `battery_mv`); `last_seen` is a timestamp updated on every request.
+    /// Duplicates in the TOML array are silently collapsed.
+    #[serde(default = "default_publish")]
+    pub publish: HashSet<Publish>,
 }
 
-fn yes() -> bool { true }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Publish {
+    /// `?battery_mv=` and `?battery_pct=` — two Home Assistant sensors per
+    /// screen.
+    Battery,
+    /// `?temp_c=` as a temperature sensor (°C).
+    Temperature,
+    /// `?humidity_pct=` as a humidity sensor (%).
+    Humidity,
+    /// `?power=battery|charging|full|fault` as an enum sensor.
+    Power,
+    /// Server-side wall-clock at request time, as a Home Assistant timestamp
+    /// sensor. Useful as a heartbeat for screens that publish no other sensors.
+    LastSeen,
+}
+
+fn default_publish() -> HashSet<Publish> {
+    [Publish::Battery, Publish::LastSeen].into_iter().collect()
+}
 
 fn deserialize_duration<'de, D>(d: D) -> Result<Duration, D::Error>
 where
