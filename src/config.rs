@@ -438,14 +438,51 @@ impl<'de> Deserialize<'de> for NoiseSource {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, Default)]
 pub enum Strategy {
     #[default]
     OctahedronClosest,
     OctahedronFurthest,
     NaiveMix,
     NaiveDominant,
+    /// 1-D grayscale, no spread (`PureSpreadGrayDecomposer` with
+    /// `spread_ratio = 0`). Requires a grayscale `dither_palette`.
+    Grayscale,
+    /// 1-D grayscale with a pure-spread ratio in `[0, 1]`. Encoded as
+    /// `gray-pure-spread:<r>` in TOML. Requires a grayscale `dither_palette`.
+    GrayPureSpread(f32),
+}
+
+impl FromStr for Strategy {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "octahedron-closest" => Ok(Self::OctahedronClosest),
+            "octahedron-furthest" => Ok(Self::OctahedronFurthest),
+            "naive-mix" => Ok(Self::NaiveMix),
+            "naive-dominant" => Ok(Self::NaiveDominant),
+            "grayscale" => Ok(Self::Grayscale),
+            _ if s.starts_with("gray-pure-spread:") => {
+                let rest = &s["gray-pure-spread:".len()..];
+                let r: f32 = rest
+                    .parse()
+                    .map_err(|_| format!("invalid spread ratio in `{s}`"))?;
+                if !(0.0..=1.0).contains(&r) {
+                    return Err(format!("spread ratio {r} out of range [0.0, 1.0]"));
+                }
+                Ok(Self::GrayPureSpread(r))
+            }
+            _ => Err(format!("unknown strategy `{s}`")),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Strategy {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -480,52 +517,105 @@ pub enum Palette {
     #[default]
     Spectra6,
     Epdoptimize,
+    /// 2-level linearly-spaced grayscale (black/white). Pair with a `gray*`
+    /// strategy.
+    Grayscale2,
+    /// 4-level linearly-spaced grayscale.
+    Grayscale4,
+    /// 16-level linearly-spaced grayscale.
+    Grayscale16,
 }
 
 impl Palette {
-    pub fn colors(&self) -> &[image::Rgb<u8>] {
-        use image::Rgb;
+    pub fn colors(&self) -> Vec<image::Rgb<u8>> {
         match self {
-            Self::Naive => &[
-                Rgb([0, 0, 0]),
-                Rgb([255, 255, 255]),
-                Rgb([255, 255, 0]),
-                Rgb([255, 0, 0]),
-                Rgb([0, 0, 255]),
-                Rgb([0, 255, 0]),
-            ],
-            Self::Spectra6 => &[
-                Rgb([58, 0, 66]),
-                Rgb([179, 208, 200]),
-                Rgb([215, 233, 0]),
-                Rgb([151, 38, 44]),
-                Rgb([61, 38, 152]),
-                Rgb([96, 104, 86]),
-            ],
-            Self::Epdoptimize => &[
-                Rgb([0x19, 0x1e, 0x21]),
-                Rgb([0xe8, 0xe8, 0xe8]),
-                Rgb([0xef, 0xde, 0x44]),
-                Rgb([0xb2, 0x13, 0x18]),
-                Rgb([0x21, 0x57, 0xba]),
-                Rgb([0x12, 0x5f, 0x20]),
-            ],
+            Self::Naive => rgb_triples(&epd_dither::decompose::octahedron::NAIVE_RGB6),
+            Self::Spectra6 => rgb_triples(&epd_dither::decompose::octahedron::SPECTRA6),
+            Self::Epdoptimize => rgb_triples(&epd_dither::decompose::naive::EPDOPTIMIZE),
+            Self::Grayscale2 => gray_triples(&epd_dither::decompose::gray::GRAYSCALE2),
+            Self::Grayscale4 => gray_triples(&epd_dither::decompose::gray::GRAYSCALE4),
+            Self::Grayscale16 => gray_triples(&epd_dither::decompose::gray::GRAYSCALE16),
         }
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+fn rgb_triples(raw: &[[u8; 3]]) -> Vec<image::Rgb<u8>> {
+    raw.iter().copied().map(image::Rgb).collect()
+}
+
+fn gray_triples(levels: &[u8]) -> Vec<image::Rgb<u8>> {
+    levels.iter().map(|&v| image::Rgb([v, v, v])).collect()
+}
+
+#[derive(Debug, Clone)]
 pub struct DitherConfig {
-    #[serde(default)]
     pub noise: NoiseSource,
-    #[serde(default)]
     pub strategy: Strategy,
-    #[serde(default)]
     pub diffuse: DiffuseMethod,
-    #[serde(default)]
     pub dither_palette: Palette,
-    #[serde(default)]
     pub output_palette: Palette,
+}
+
+/// Strategy-driven default palette: grayscale strategies pick `grayscale4`,
+/// colour strategies pick `spectra6`. Used when neither `dither_palette` nor
+/// `output_palette` is specified in TOML.
+fn default_palette_for(strategy: &Strategy) -> Palette {
+    match strategy {
+        Strategy::Grayscale | Strategy::GrayPureSpread(_) => Palette::Grayscale4,
+        _ => Palette::Spectra6,
+    }
+}
+
+impl Default for DitherConfig {
+    fn default() -> Self {
+        let strategy = Strategy::default();
+        let palette = default_palette_for(&strategy);
+        Self {
+            noise: Default::default(),
+            strategy,
+            diffuse: Default::default(),
+            dither_palette: palette.clone(),
+            output_palette: palette,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for DitherConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Raw {
+            #[serde(default)]
+            noise: NoiseSource,
+            #[serde(default)]
+            strategy: Strategy,
+            #[serde(default)]
+            diffuse: DiffuseMethod,
+            dither_palette: Option<Palette>,
+            output_palette: Option<Palette>,
+        }
+        let raw = Raw::deserialize(d)?;
+        // Whichever palette the user named applies to both halves. Naming
+        // both keeps the explicit pair; naming neither falls back to a
+        // strategy-appropriate default (spectra6 for colour, grayscale4 for
+        // gray), so a `strategy = "grayscale"` line "just works".
+        let (dither_palette, output_palette) = match (raw.dither_palette, raw.output_palette) {
+            (Some(d), Some(o)) => (d, o),
+            (Some(d), None) => (d.clone(), d),
+            (None, Some(o)) => (o.clone(), o),
+            (None, None) => {
+                let p = default_palette_for(&raw.strategy);
+                (p.clone(), p)
+            }
+        };
+        Ok(Self {
+            noise: raw.noise,
+            strategy: raw.strategy,
+            diffuse: raw.diffuse,
+            dither_palette,
+            output_palette,
+        })
+    }
 }
 
 // ----- Tests ----------------------------------------------------------------
@@ -602,5 +692,77 @@ mod tests {
     fn rotate_rejects_invalid_cron() {
         let r: Result<Rotate, _> = toml::from_str(r#"cron = "not a schedule""#);
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn strategy_parses_unit_variants() {
+        assert!(matches!("octahedron-closest".parse(), Ok(Strategy::OctahedronClosest)));
+        assert!(matches!("naive-mix".parse(), Ok(Strategy::NaiveMix)));
+        assert!(matches!("grayscale".parse(), Ok(Strategy::Grayscale)));
+    }
+
+    #[test]
+    fn strategy_parses_gray_pure_spread() {
+        match "gray-pure-spread:0.25".parse::<Strategy>() {
+            Ok(Strategy::GrayPureSpread(r)) => assert!((r - 0.25).abs() < 1e-6),
+            other => panic!("expected GrayPureSpread(0.25), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn strategy_rejects_out_of_range_spread() {
+        assert!("gray-pure-spread:1.5".parse::<Strategy>().is_err());
+        assert!("gray-pure-spread:-0.1".parse::<Strategy>().is_err());
+        assert!("gray-pure-spread:nope".parse::<Strategy>().is_err());
+        assert!("gray-banana".parse::<Strategy>().is_err());
+    }
+
+    #[test]
+    fn dither_palette_only_dither_specified_mirrors_to_output() {
+        let cfg: DitherConfig = toml::from_str(r#"dither_palette = "grayscale16""#).unwrap();
+        assert!(matches!(cfg.dither_palette, Palette::Grayscale16));
+        assert!(matches!(cfg.output_palette, Palette::Grayscale16));
+    }
+
+    #[test]
+    fn dither_palette_only_output_specified_mirrors_to_dither() {
+        let cfg: DitherConfig = toml::from_str(r#"output_palette = "epdoptimize""#).unwrap();
+        assert!(matches!(cfg.dither_palette, Palette::Epdoptimize));
+        assert!(matches!(cfg.output_palette, Palette::Epdoptimize));
+    }
+
+    #[test]
+    fn dither_palette_both_specified_kept_distinct() {
+        let cfg: DitherConfig = toml::from_str(
+            r#"
+                dither_palette = "epdoptimize"
+                output_palette = "spectra6"
+            "#,
+        )
+        .unwrap();
+        assert!(matches!(cfg.dither_palette, Palette::Epdoptimize));
+        assert!(matches!(cfg.output_palette, Palette::Spectra6));
+    }
+
+    #[test]
+    fn dither_palette_default_for_colour_strategy_is_spectra6() {
+        let cfg: DitherConfig = toml::from_str("").unwrap();
+        assert!(matches!(cfg.dither_palette, Palette::Spectra6));
+        assert!(matches!(cfg.output_palette, Palette::Spectra6));
+    }
+
+    #[test]
+    fn dither_palette_default_for_gray_strategy_is_grayscale4() {
+        let cfg: DitherConfig = toml::from_str(r#"strategy = "grayscale""#).unwrap();
+        assert!(matches!(cfg.dither_palette, Palette::Grayscale4));
+        assert!(matches!(cfg.output_palette, Palette::Grayscale4));
+    }
+
+    #[test]
+    fn dither_palette_default_for_gray_pure_spread_is_grayscale4() {
+        let cfg: DitherConfig =
+            toml::from_str(r#"strategy = "gray-pure-spread:0.25""#).unwrap();
+        assert!(matches!(cfg.dither_palette, Palette::Grayscale4));
+        assert!(matches!(cfg.output_palette, Palette::Grayscale4));
     }
 }

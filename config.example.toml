@@ -106,10 +106,22 @@ thresholds = [
 
 [screens.dither]
 noise = "ign"                   # none | bayer | bayer:N | ign | white
-strategy = "octahedron-closest" # octahedron-closest | octahedron-furthest | naive-mix | naive-dominant
+# Decomposition strategy.
+#   octahedron-closest / octahedron-furthest — 6-colour palettes that form a
+#       regular convex octahedron (e.g. spectra6, naive)
+#   naive-mix / naive-dominant — arbitrary 6-colour palettes (e.g. epdoptimize)
+#   grayscale — 1-D grayscale, no spread; needs a `grayscale*` dither_palette
+#   gray-pure-spread:<r> — same, with pure-spread ratio r in [0, 1]
+strategy = "octahedron-closest"
 diffuse = "floyd-steinberg"     # none | floyd-steinberg | jarvis-judice-and-ninke | atkinson | sierra
-dither_palette = "spectra6"     # naive | spectra6 | epdoptimize
-output_palette = "spectra6"
+# Palettes. `dither_palette` is what the dither targets; `output_palette` is
+# what gets written into the PNG palette table. Naming one mirrors it to the
+# other; naming neither falls back to `spectra6` for colour strategies and
+# `grayscale4` for `grayscale` / `gray-pure-spread:*`. Set both explicitly
+# only when they should differ — see the bedroom screen below for the
+# epdoptimize-to-spectra6 case.
+#   naive | spectra6 | epdoptimize | grayscale2 | grayscale4 | grayscale16
+dither_palette = "spectra6"
 
 [[screens]]
 name = "bedroom"

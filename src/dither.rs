@@ -1,7 +1,11 @@
+use epd_dither::decompose::gray::PureSpreadGrayDecomposer;
 use epd_dither::decompose::naive::{NaiveDecomposer, NaiveDecomposerStrategy};
 use epd_dither::decompose::octahedron::{OctahedronDecomposer, OctahedronDecomposerAxisStrategy};
+use epd_dither::dither::DecomposingDitherStrategy;
+use epd_dither::dither::diffuse::{ImageWriter, diffuse_dither};
+use epd_dither::image_adapter::PaletteDitheringWithNoise;
 use image::{Rgb, RgbImage};
-use nalgebra::{DVector, geometry::Point3};
+use nalgebra::geometry::Point3;
 use png::BitDepth;
 use rand::distr::StandardUniform;
 use rand::prelude::*;
@@ -28,62 +32,66 @@ fn color_to_point(color: Rgb<u8>) -> Point3<f32> {
     Point3::new(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0)
 }
 
-fn owned_to_dynamic_vector<T: nalgebra::Scalar, const N: usize>(
-    vec: nalgebra::SVector<T, N>,
-) -> DVector<T> {
-    DVector::from_column_slice(vec.as_slice())
+/// BT.709 luma applied directly in sRGB (no gamma round-trip), matching the
+/// upstream `dither` binary so behaviour aligns with the reference output.
+fn rgb_to_brightness(color: Rgb<u8>) -> f32 {
+    let [r, g, b] = color.0;
+    0.2126 * (r as f32 / 255.0) + 0.7152 * (g as f32 / 255.0) + 0.0722 * (b as f32 / 255.0)
 }
 
-// --- ImageSize / ImageReader / ImageWriter impls ---
+/// Extract strictly-ascending grayscale levels from an achromatic palette.
+/// Errors if any palette entry has `r != g != b` or if the levels aren't
+/// sorted ascending — `PureSpreadGrayDecomposer::new` would reject them
+/// anyway, but we want a clear message naming the offending entry.
+fn grayscale_levels(palette: &[Rgb<u8>]) -> anyhow::Result<Vec<f32>> {
+    let levels: Vec<f32> = palette
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let [r, g, b] = p.0;
+            if !(r == g && g == b) {
+                anyhow::bail!(
+                    "grayscale strategy requires r == g == b for every dither_palette entry; \
+                     entry {i} = {p:?} is not achromatic"
+                );
+            }
+            Ok(r as f32 / 255.0)
+        })
+        .collect::<anyhow::Result<_>>()?;
+    for w in levels.windows(2) {
+        if w[0] >= w[1] {
+            anyhow::bail!(
+                "grayscale dither_palette must be sorted strictly ascending by brightness"
+            );
+        }
+    }
+    Ok(levels)
+}
 
-struct DitherBuffer<F: Fn(usize, usize) -> Option<f32>> {
-    image: RgbImage,
-    noise_fn: F,
-    /// Palette-indexed output, packed MSB-first at `bits_per_pixel`; each
-    /// scanline starts on a byte boundary. Pre-allocated to the packed size.
-    target: Vec<u8>,
+/// `ImageWriter<usize>` sink that packs palette indices MSB-first into the
+/// indexed-PNG byte layout (each scanline byte-aligned). Pre-allocated to the
+/// packed size on construction.
+struct PackedIndexWriter {
+    width: usize,
     bits_per_pixel: u8,
+    target: Vec<u8>,
 }
 
-impl<F: Fn(usize, usize) -> Option<f32>> DitherBuffer<F> {
+impl PackedIndexWriter {
+    fn new(width: usize, height: usize, bits_per_pixel: u8) -> Self {
+        let px_per_byte = 8 / bits_per_pixel as usize;
+        let row_bytes = width.div_ceil(px_per_byte);
+        Self { width, bits_per_pixel, target: vec![0u8; row_bytes * height] }
+    }
+
     fn row_bytes(&self) -> usize {
         let px_per_byte = 8 / self.bits_per_pixel as usize;
-        (self.image.width() as usize).div_ceil(px_per_byte)
-    }
-
-    fn packed_size(&self) -> usize {
-        self.row_bytes() * self.image.height() as usize
+        self.width.div_ceil(px_per_byte)
     }
 }
 
-impl<F: Fn(usize, usize) -> Option<f32>> epd_dither::dither::diffuse::ImageSize
-    for DitherBuffer<F>
-{
-    fn width(&self) -> usize {
-        self.image.width() as usize
-    }
-    fn height(&self) -> usize {
-        self.image.height() as usize
-    }
-}
-
-impl<F: Fn(usize, usize) -> Option<f32>>
-    epd_dither::dither::diffuse::ImageReader<(Rgb<u8>, Option<f32>)> for DitherBuffer<F>
-{
-    fn get_pixel(&self, x: usize, y: usize) -> (Rgb<u8>, Option<f32>) {
-        (
-            *self.image.get_pixel(x as u32, y as u32),
-            (self.noise_fn)(x, y),
-        )
-    }
-}
-
-impl<F: Fn(usize, usize) -> Option<f32>> epd_dither::dither::diffuse::ImageWriter<u8>
-    for DitherBuffer<F>
-{
-    fn put_pixel(&mut self, x: usize, y: usize, pixel: u8) {
-        // Defensive: no-op when already sized. Keeps put_pixel self-contained.
-        self.target.resize(self.packed_size(), 0);
+impl ImageWriter<usize> for PackedIndexWriter {
+    fn put_pixel(&mut self, x: usize, y: usize, pixel: usize) {
         let bpp = self.bits_per_pixel as usize;
         let px_per_byte = 8 / bpp;
         let row_bytes = self.row_bytes();
@@ -92,118 +100,14 @@ impl<F: Fn(usize, usize) -> Option<f32>> epd_dither::dither::diffuse::ImageWrite
         let shift = (px_per_byte - 1 - (x % px_per_byte)) * bpp;
         let mask = ((1u32 << bpp) - 1) as u8;
         let byte = &mut self.target[y * row_bytes + byte_x];
-        *byte = (*byte & !(mask << shift)) | ((pixel & mask) << shift);
+        *byte = (*byte & !(mask << shift)) | (((pixel as u8) & mask) << shift);
     }
 }
-
-// --- PixelStrategy ---
-
-struct DecomposingDitherStrategy {
-    decompose_fn: Box<dyn Fn(Point3<f32>) -> DVector<f32>>,
-}
-
-#[derive(Clone, Default)]
-struct DecomposedQuantizationError(Option<DVector<f32>>);
-
-impl core::ops::Mul<usize> for DecomposedQuantizationError {
-    type Output = Self;
-    fn mul(self, rhs: usize) -> Self {
-        Self(self.0.map(|x| x * (rhs as f32)))
-    }
-}
-
-impl core::ops::Div<usize> for DecomposedQuantizationError {
-    type Output = Self;
-    fn div(self, rhs: usize) -> Self {
-        Self(self.0.map(|x| x / (rhs as f32)))
-    }
-}
-
-impl core::ops::AddAssign for DecomposedQuantizationError {
-    fn add_assign(&mut self, rhs: Self) {
-        self.0 = match (core::mem::take(&mut self.0), rhs.0) {
-            (a, None) => a,
-            (None, b) => b,
-            (Some(a), Some(b)) => Some(a + b),
-        };
-    }
-}
-
-impl epd_dither::dither::diffuse::PixelStrategy for DecomposingDitherStrategy {
-    type Source = (Rgb<u8>, Option<f32>);
-    type Target = u8;
-    type QuantizationError = DecomposedQuantizationError;
-
-    fn quantize(
-        &self,
-        source: Self::Source,
-        error: Self::QuantizationError,
-    ) -> (Self::Target, Self::QuantizationError) {
-        let (source, noise) = source;
-        let decomposed = (self.decompose_fn)(color_to_point(source));
-        let decomposed = match error.0 {
-            None => decomposed,
-            Some(e) => decomposed + e,
-        };
-        let clipped = decomposed.map(|x| x.max(0.0));
-        let clipped_sum = clipped.sum();
-
-        let index = if let Some(noise) = noise
-            && clipped_sum > 0.0
-        {
-            let mut noise = noise * clipped_sum;
-            let mut i = 0;
-            while i + 1 < clipped.nrows() && noise >= clipped[i] {
-                noise -= clipped[i];
-                i += 1;
-            }
-            i
-        } else {
-            decomposed.argmax().0
-        };
-
-        let mut err = decomposed;
-        err[index] -= 1.0;
-        // Palette size is bounded by u8 (≤6 entries in practice); cast is safe.
-        (index as u8, DecomposedQuantizationError(Some(err)))
-    }
-}
-
-// --- Public entry point ---
 
 /// Dither `img` and return an indexed PNG at the image's own dimensions.
 pub fn process(img: RgbImage, config: &DitherConfig) -> anyhow::Result<Vec<u8>> {
     let palette_points: Vec<Point3<f32>> =
         config.dither_palette.colors().iter().copied().map(color_to_point).collect();
-
-    let decompose: Box<dyn Fn(Point3<f32>) -> DVector<f32>> = match config.strategy {
-        Strategy::OctahedronClosest => {
-            let d = OctahedronDecomposer::new(&palette_points)
-                .ok_or_else(|| anyhow::anyhow!("failed to build OctahedronDecomposer"))?;
-            Box::new(move |x| {
-                owned_to_dynamic_vector(d.decompose(&x, OctahedronDecomposerAxisStrategy::Closest))
-            })
-        }
-        Strategy::OctahedronFurthest => {
-            let d = OctahedronDecomposer::new(&palette_points)
-                .ok_or_else(|| anyhow::anyhow!("failed to build OctahedronDecomposer"))?;
-            Box::new(move |x| {
-                owned_to_dynamic_vector(
-                    d.decompose(&x, OctahedronDecomposerAxisStrategy::Furthest),
-                )
-            })
-        }
-        Strategy::NaiveMix => {
-            let d = NaiveDecomposer::new(&palette_points)
-                .ok_or_else(|| anyhow::anyhow!("failed to build NaiveDecomposer"))?;
-            Box::new(move |x| d.decompose(&x, NaiveDecomposerStrategy::FavorMix))
-        }
-        Strategy::NaiveDominant => {
-            let d = NaiveDecomposer::new(&palette_points)
-                .ok_or_else(|| anyhow::anyhow!("failed to build NaiveDecomposer"))?;
-            Box::new(move |x| d.decompose(&x, NaiveDecomposerStrategy::FavorDominant))
-        }
-    };
 
     let noise = config.noise.clone();
     let noise_fn = move |x: usize, y: usize| -> Option<f32> {
@@ -218,29 +122,86 @@ pub fn process(img: RgbImage, config: &DitherConfig) -> anyhow::Result<Vec<u8>> 
         }
     };
 
+    let (width, height) = (img.width() as usize, img.height() as usize);
     let bit_depth = bit_depth_for(palette_points.len());
     let bpp = bits_per_pixel(bit_depth);
-    let mut buf = DitherBuffer {
+    let mut inout = PaletteDitheringWithNoise {
         image: img,
         noise_fn,
-        target: Vec::new(),
-        bits_per_pixel: bpp,
+        writer: PackedIndexWriter::new(width, height, bpp),
     };
-    buf.target = vec![0u8; buf.packed_size()];
+    let matrix = config.diffuse.to_boxed_matrix();
 
-    epd_dither::dither::diffuse::diffuse_dither(
-        DecomposingDitherStrategy { decompose_fn: decompose },
-        config.diffuse.to_boxed_matrix(),
-        &mut buf,
-        true,
-    );
+    match config.strategy {
+        Strategy::OctahedronClosest => {
+            let decomposer = OctahedronDecomposer::new(&palette_points)
+                .ok_or_else(|| anyhow::anyhow!("failed to build OctahedronDecomposer"))?
+                .with_strategy(OctahedronDecomposerAxisStrategy::Closest);
+            diffuse_dither(
+                DecomposingDitherStrategy::new(decomposer, color_to_point),
+                matrix,
+                &mut inout,
+                true,
+            );
+        }
+        Strategy::OctahedronFurthest => {
+            let decomposer = OctahedronDecomposer::new(&palette_points)
+                .ok_or_else(|| anyhow::anyhow!("failed to build OctahedronDecomposer"))?
+                .with_strategy(OctahedronDecomposerAxisStrategy::Furthest);
+            diffuse_dither(
+                DecomposingDitherStrategy::new(decomposer, color_to_point),
+                matrix,
+                &mut inout,
+                true,
+            );
+        }
+        Strategy::NaiveMix => {
+            let decomposer = NaiveDecomposer::new(&palette_points)
+                .ok_or_else(|| anyhow::anyhow!("failed to build NaiveDecomposer"))?
+                .with_strategy(NaiveDecomposerStrategy::FavorMix);
+            diffuse_dither(
+                DecomposingDitherStrategy::new(decomposer, color_to_point),
+                matrix,
+                &mut inout,
+                true,
+            );
+        }
+        Strategy::NaiveDominant => {
+            let decomposer = NaiveDecomposer::new(&palette_points)
+                .ok_or_else(|| anyhow::anyhow!("failed to build NaiveDecomposer"))?
+                .with_strategy(NaiveDecomposerStrategy::FavorDominant);
+            diffuse_dither(
+                DecomposingDitherStrategy::new(decomposer, color_to_point),
+                matrix,
+                &mut inout,
+                true,
+            );
+        }
+        Strategy::Grayscale | Strategy::GrayPureSpread(_) => {
+            let spread = match config.strategy {
+                Strategy::Grayscale => 0.0,
+                Strategy::GrayPureSpread(r) => r,
+                _ => unreachable!(),
+            };
+            let levels = grayscale_levels(config.dither_palette.colors().as_slice())?;
+            let decomposer = PureSpreadGrayDecomposer::new(levels)
+                .ok_or_else(|| anyhow::anyhow!("failed to build PureSpreadGrayDecomposer"))?
+                .with_spread_ratio(spread);
+            diffuse_dither(
+                DecomposingDitherStrategy::new(decomposer, rgb_to_brightness),
+                matrix,
+                &mut inout,
+                true,
+            );
+        }
+    }
 
-    // Encode as indexed PNG; buf.target is already packed at `bit_depth`.
+    // Encode as indexed PNG; writer.target is already packed at `bit_depth`.
     let mut png_bytes: Vec<u8> = Vec::new();
     let mut encoder = png::Encoder::new(
         std::io::BufWriter::new(&mut png_bytes),
-        buf.image.width(),
-        buf.image.height(),
+        inout.image.width(),
+        inout.image.height(),
     );
     encoder.set_color(png::ColorType::Indexed);
     encoder.set_depth(bit_depth);
@@ -252,7 +213,7 @@ pub fn process(img: RgbImage, config: &DitherConfig) -> anyhow::Result<Vec<u8>> 
         .collect();
     encoder.set_palette(palette_bytes);
     let mut writer = encoder.write_header()?;
-    writer.write_image_data(&buf.target)?;
+    writer.write_image_data(&inout.writer.target)?;
     drop(writer);
 
     Ok(png_bytes)
@@ -261,18 +222,9 @@ pub fn process(img: RgbImage, config: &DitherConfig) -> anyhow::Result<Vec<u8>> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use epd_dither::dither::diffuse::ImageWriter;
 
-    fn buf(width: u32, height: u32, bpp: u8) -> DitherBuffer<impl Fn(usize, usize) -> Option<f32>> {
-        let image = RgbImage::new(width, height);
-        let mut buf = DitherBuffer {
-            image,
-            noise_fn: |_, _| None,
-            target: Vec::new(),
-            bits_per_pixel: bpp,
-        };
-        buf.target = vec![0u8; buf.packed_size()];
-        buf
+    fn writer(width: u32, height: u32, bpp: u8) -> PackedIndexWriter {
+        PackedIndexWriter::new(width as usize, height as usize, bpp)
     }
 
     #[test]
@@ -286,47 +238,76 @@ mod tests {
 
     #[test]
     fn pack_8bit_writes_one_byte_per_pixel() {
-        let mut b = buf(3, 2, 8);
-        b.put_pixel(0, 0, 0xAA);
-        b.put_pixel(2, 1, 0xBB);
-        assert_eq!(b.target, vec![0xAA, 0, 0, 0, 0, 0xBB]);
+        let mut w = writer(3, 2, 8);
+        w.put_pixel(0, 0, 0xAA);
+        w.put_pixel(2, 1, 0xBB);
+        assert_eq!(w.target, vec![0xAA, 0, 0, 0, 0, 0xBB]);
     }
 
     #[test]
     fn pack_4bit_msb_first_and_rounds_rows() {
-        let mut b = buf(3, 1, 4);
-        b.put_pixel(0, 0, 0x0);
-        b.put_pixel(1, 0, 0xA);
-        b.put_pixel(2, 0, 0x5);
+        let mut w = writer(3, 1, 4);
+        w.put_pixel(0, 0, 0x0);
+        w.put_pixel(1, 0, 0xA);
+        w.put_pixel(2, 0, 0x5);
         // Row has 3 pixels at 4 bpp => 2 bytes (second byte's low nibble is padding).
-        assert_eq!(b.target, vec![0x0A, 0x50]);
+        assert_eq!(w.target, vec![0x0A, 0x50]);
     }
 
     #[test]
     fn pack_2bit_packs_four_per_byte() {
-        let mut b = buf(5, 1, 2);
-        for (x, v) in [0u8, 1, 2, 3, 1].iter().enumerate() {
-            b.put_pixel(x, 0, *v);
+        let mut w = writer(5, 1, 2);
+        for (x, v) in [0usize, 1, 2, 3, 1].iter().enumerate() {
+            w.put_pixel(x, 0, *v);
         }
         // 00 01 10 11 | 01 00 00 00  =>  0b00011011, 0b01000000
-        assert_eq!(b.target, vec![0b00_01_10_11, 0b01_00_00_00]);
+        assert_eq!(w.target, vec![0b00_01_10_11, 0b01_00_00_00]);
     }
 
     #[test]
     fn pack_1bit_msb_first() {
-        let mut b = buf(9, 1, 1);
-        for (x, v) in [1u8, 0, 1, 1, 0, 0, 1, 0, 1].iter().enumerate() {
-            b.put_pixel(x, 0, *v);
+        let mut w = writer(9, 1, 1);
+        for (x, v) in [1usize, 0, 1, 1, 0, 0, 1, 0, 1].iter().enumerate() {
+            w.put_pixel(x, 0, *v);
         }
         // 10110010 | 10000000
-        assert_eq!(b.target, vec![0b1011_0010, 0b1000_0000]);
+        assert_eq!(w.target, vec![0b1011_0010, 0b1000_0000]);
     }
 
     #[test]
     fn put_pixel_overwrites_on_repeat() {
-        let mut b = buf(2, 1, 4);
-        b.put_pixel(0, 0, 0xF);
-        b.put_pixel(0, 0, 0x3);
-        assert_eq!(b.target, vec![0x30]);
+        let mut w = writer(2, 1, 4);
+        w.put_pixel(0, 0, 0xF);
+        w.put_pixel(0, 0, 0x3);
+        assert_eq!(w.target, vec![0x30]);
+    }
+
+    #[test]
+    fn grayscale_levels_rejects_chromatic_entries() {
+        let palette = [Rgb([0, 0, 0]), Rgb([100, 50, 50]), Rgb([255, 255, 255])];
+        assert!(grayscale_levels(&palette).is_err());
+    }
+
+    #[test]
+    fn grayscale_levels_rejects_unsorted_palette() {
+        let palette = [Rgb([0, 0, 0]), Rgb([255, 255, 255]), Rgb([128, 128, 128])];
+        assert!(grayscale_levels(&palette).is_err());
+    }
+
+    #[test]
+    fn process_gray_pipeline_produces_indexed_png() {
+        use crate::config::{DiffuseMethod, NoiseSource, Palette, Strategy};
+
+        let img = RgbImage::from_pixel(8, 4, Rgb([128, 128, 128]));
+        let cfg = DitherConfig {
+            noise: NoiseSource::None,
+            strategy: Strategy::GrayPureSpread(0.25),
+            diffuse: DiffuseMethod::FloydSteinberg,
+            dither_palette: Palette::Grayscale4,
+            output_palette: Palette::Grayscale4,
+        };
+        let png_bytes = process(img, &cfg).expect("gray pipeline should succeed");
+        // PNG magic.
+        assert_eq!(&png_bytes[..8], b"\x89PNG\r\n\x1a\n");
     }
 }
