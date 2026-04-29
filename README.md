@@ -74,3 +74,32 @@ constants `config_lowBatteryWarningLevel = 20` and
 `ColorProfile`. Note that on a real device the yellow tier triggers
 on battery-saver mode rather than a fixed percentage, so the two-tier
 threshold form is an approximation of the user-visible behaviour.
+
+## MQTT / Home Assistant
+
+If the top-level `[mqtt]` section is present, the server forwards
+device-supplied query-string sensor values to a broker and announces
+them once on startup via Home Assistant's MQTT discovery protocol.
+Each screen becomes one HA *device*; the per-screen `publish_*` flags
+decide which sensors hang off it:
+
+| Flag | Query params consumed | HA sensors |
+|---|---|---|
+| `publish_battery` (default `true`)  | `battery_mv`, `battery_pct` | Battery voltage (mV, `voltage` class), Battery (%, `battery` class) |
+| `publish_temperature` (default false) | `temp_c`                     | Temperature (°C, `temperature` class) |
+| `publish_humidity` (default false)    | `humidity_pct`               | Humidity (%, `humidity` class) |
+| `publish_power` (default false)       | `power`                      | Power (`enum` class, options `battery` / `charging` / `full` / `fault`) |
+
+Discovery topic: `<discovery_prefix>/sensor/epd_photoframe_<slug>/<key>/config`,
+state topic: `<state_prefix>/<screen>/<key>` — where `<slug>` lowercases
+the screen name and replaces non-alphanumerics with `_` (HA's `node_id`
+restriction), while the state-topic uses the original screen name.
+A request like
+
+```
+GET /screen/living-room?battery_mv=3660&battery_pct=38&temp_c=21.87&humidity_pct=45.64&power=charging
+```
+
+triggers a `try_publish` per enabled-and-present sensor (fire-and-forget;
+the response never blocks on the broker). Connection failures are
+logged and retried by rumqttc's eventloop in the background.

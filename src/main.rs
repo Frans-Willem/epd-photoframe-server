@@ -4,6 +4,7 @@ mod battery_indicator;
 mod config;
 mod dither;
 mod infobox;
+mod mqtt;
 mod overlay;
 mod screen_state;
 mod weather;
@@ -28,6 +29,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use album::AlbumClient;
 use config::{Config, ScreenConfig};
+use mqtt::Publisher;
 use screen_state::{ScreenState, resolve_index, resolve_tz, seconds_until};
 
 struct Screen {
@@ -41,6 +43,7 @@ struct Screen {
 struct AppState {
     screens: Arc<HashMap<String, Screen>>,
     http: Client,
+    mqtt: Option<Publisher>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -48,7 +51,15 @@ struct ScreenQuery {
     #[serde(default)]
     action: Option<Action>,
     #[serde(default)]
+    battery_mv: Option<u32>,
+    #[serde(default)]
     battery_pct: Option<u8>,
+    #[serde(default, rename = "temp_c")]
+    temperature_c: Option<f32>,
+    #[serde(default)]
+    humidity_pct: Option<f32>,
+    #[serde(default)]
+    power: Option<PowerState>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -57,6 +68,26 @@ enum Action {
     Next,
     Previous,
     Refresh,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum PowerState {
+    Battery,
+    Charging,
+    Full,
+    Fault,
+}
+
+impl std::fmt::Display for PowerState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            PowerState::Battery => "battery",
+            PowerState::Charging => "charging",
+            PowerState::Full => "full",
+            PowerState::Fault => "fault",
+        })
+    }
 }
 
 #[tokio::main]
@@ -72,6 +103,11 @@ async fn main() -> anyhow::Result<()> {
     let config_path = std::env::args().nth(1).unwrap_or_else(|| "config.toml".to_string());
     let config = Config::from_file(&config_path)?;
     tracing::info!(path = %config_path, screens = config.screens.len(), "loaded config");
+
+    let mqtt = config.mqtt.as_ref().map(|m| {
+        tracing::info!(broker = %m.broker, port = m.port, "connecting to mqtt broker");
+        Publisher::connect(m, &config.screens)
+    });
 
     let now = Utc::now();
     let screens: HashMap<String, Screen> = config
@@ -89,6 +125,7 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         screens: Arc::new(screens),
         http: Client::builder().build()?,
+        mqtt,
     };
 
     let app = Router::new()
@@ -141,6 +178,32 @@ async fn screen_handler(
 
     if let (Some(indicator_cfg), Some(pct)) = (&cfg.battery_indicator, q.battery_pct) {
         battery_indicator::apply(&mut img, indicator_cfg, pct);
+    }
+
+    if let Some(publisher) = &state.mqtt {
+        if cfg.publish_battery {
+            if let Some(v) = q.battery_mv {
+                publisher.publish(&name, "battery_mv", v);
+            }
+            if let Some(v) = q.battery_pct {
+                publisher.publish(&name, "battery_pct", v);
+            }
+        }
+        if cfg.publish_temperature {
+            if let Some(v) = q.temperature_c {
+                publisher.publish(&name, "temperature", v);
+            }
+        }
+        if cfg.publish_humidity {
+            if let Some(v) = q.humidity_pct {
+                publisher.publish(&name, "humidity", v);
+            }
+        }
+        if cfg.publish_power {
+            if let Some(v) = q.power {
+                publisher.publish(&name, "power", v);
+            }
+        }
     }
 
     let png = tokio::task::spawn_blocking({

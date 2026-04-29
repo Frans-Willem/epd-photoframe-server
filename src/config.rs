@@ -7,8 +7,34 @@ use tiny_skia::ColorU8;
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
+    /// Optional MQTT broker. When present, screens with any `publish_*` flag
+    /// set will report their device-supplied sensor values (battery, etc.) and
+    /// emit Home Assistant discovery configs on startup.
+    #[serde(default)]
+    pub mqtt: Option<MqttConfig>,
     pub screens: Vec<ScreenConfig>,
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MqttConfig {
+    pub broker: String,
+    #[serde(default = "default_mqtt_port")]
+    pub port: u16,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    #[serde(default = "default_mqtt_client_id")]
+    pub client_id: String,
+    #[serde(default = "default_mqtt_discovery_prefix")]
+    pub discovery_prefix: String,
+    #[serde(default = "default_mqtt_state_prefix")]
+    pub state_prefix: String,
+}
+
+fn default_mqtt_port() -> u16 { 1883 }
+fn default_mqtt_client_id() -> String { "epd-photoframe-server".into() }
+fn default_mqtt_discovery_prefix() -> String { "homeassistant".into() }
+fn default_mqtt_state_prefix() -> String { "epd-photoframe".into() }
 
 #[derive(Debug, Deserialize)]
 pub struct ScreenConfig {
@@ -50,7 +76,23 @@ pub struct ScreenConfig {
     pub timezone: Option<String>,
     #[serde(default)]
     pub dither: DitherConfig,
+    /// Forward `?battery_mv=` and `?battery_pct=` to MQTT (one HA sensor each).
+    /// Defaults to `true` — every device is expected to have a battery; set
+    /// to `false` to suppress.
+    #[serde(default = "yes")]
+    pub publish_battery: bool,
+    /// Forward `?temp_c=` to MQTT as a temperature sensor.
+    #[serde(default)]
+    pub publish_temperature: bool,
+    /// Forward `?humidity_pct=` to MQTT as a humidity sensor.
+    #[serde(default)]
+    pub publish_humidity: bool,
+    /// Forward `?power=battery|charging|full|fault` to MQTT as an enum sensor.
+    #[serde(default)]
+    pub publish_power: bool,
 }
+
+fn yes() -> bool { true }
 
 fn deserialize_duration<'de, D>(d: D) -> Result<Duration, D::Error>
 where

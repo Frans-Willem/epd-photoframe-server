@@ -1,3 +1,16 @@
+# Optional. When present, screens with any `publish_*` flag will report
+# device-supplied query-string sensor values (battery, temperature, humidity)
+# to MQTT, and a Home Assistant discovery config is published once on startup
+# for each enabled sensor. Drop the section to disable MQTT entirely.
+# [mqtt]
+# broker = "homeassistant.local"
+# port = 1883                                # default
+# username = "epd"
+# password = "secret"
+# client_id = "epd-photoframe-server"        # default
+# discovery_prefix = "homeassistant"         # default
+# state_prefix = "epd-photoframe"            # default
+
 [[screens]]
 name = "living-room"
 width = 800
@@ -37,6 +50,14 @@ rotate.cron = "0 0 2,14 * * *"
 # two wakes when the device fires slightly early. Accepts humantime strings
 # like "30s", "15m", "1h 30m". Defaults to 0.
 wake_delay = "1h"
+# Per-screen MQTT publish flags. Each maps a query parameter the device may
+# send to a Home Assistant sensor (grouped under one HA device per screen).
+# `publish_battery` defaults to true (covering both `?battery_mv=` and
+# `?battery_pct=` as separate sensors); the others default to false.
+publish_battery = true
+publish_temperature = true       # device sends `?temp_c=…`
+publish_humidity = true          # device sends `?humidity_pct=…`
+publish_power = true             # device sends `?power=battery|charging|full|fault`
 
 # Optional info overlay — day of week, date, weather.
 [screens.infobox]
