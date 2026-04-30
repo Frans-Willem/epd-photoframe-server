@@ -38,22 +38,3 @@ Spectra 6 modules and may ship with slightly different pigment
 balances; possibly even per-unit if variance between two E1002s
 turns out to matter.
 
-## Move firmware-supplied params from query string to headers
-
-The growing list of values the firmware sends (`battery_pct`,
-`battery_mv`, `temperature_c`, `humidity_pct`, `power`, `action`)
-is making URLs unwieldy. Move them to custom request headers so
-the firmware can attach them to a plain GET against any PNG
-server — including a generic static-file host serving up a PNG —
-and have the metadata simply be ignored by anything that doesn't
-care.
-
-- Header names: kebab-case, no `X-` prefix (RFC 6648). E.g.
-  `Battery-Pct`, `Battery-Mv`, `Temperature-C`, `Humidity-Pct`,
-  `Power`, `Action`.
-- Server reads both headers and query string; query string wins
-  when both are present, so dropping `?action=refresh` in a
-  browser still works for debugging.
-- POST is *not* an option — generic static servers respond to
-  POST with 405, breaking the "point the firmware at any PNG
-  URL" use case.
