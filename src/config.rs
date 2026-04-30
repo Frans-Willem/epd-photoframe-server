@@ -1,3 +1,4 @@
+use chrono_tz::Tz;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::str::FromStr;
@@ -96,10 +97,13 @@ pub struct ScreenConfig {
         deserialize_with = "deserialize_duration"
     )]
     pub error_refresh: Duration,
-    /// IANA timezone name (e.g. `Europe/Amsterdam`) used for rotation
-    /// scheduling and the infobox. Defaults to the system timezone.
-    #[serde(default)]
-    pub timezone: Option<String>,
+    /// IANA timezone (e.g. `Europe/Amsterdam`) used for rotation scheduling
+    /// and the infobox. Defaults to the system timezone.
+    #[serde(
+        default = "default_timezone",
+        deserialize_with = "deserialize_timezone"
+    )]
+    pub timezone: Tz,
     #[serde(default)]
     pub dither: DitherConfig,
     /// Sensors to forward to MQTT for this screen. Each entry maps to one or
@@ -141,6 +145,22 @@ where
 {
     let s = String::deserialize(d)?;
     humantime::parse_duration(&s).map_err(serde::de::Error::custom)
+}
+
+fn default_timezone() -> Tz {
+    let name = iana_time_zone::get_timezone()
+        .expect("system timezone detection failed; set `timezone` explicitly in config");
+    name.parse::<Tz>()
+        .unwrap_or_else(|e| panic!("system timezone `{name}` is not a known IANA name: {e}"))
+}
+
+fn deserialize_timezone<'de, D>(d: D) -> Result<Tz, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let name = String::deserialize(d)?;
+    name.parse::<Tz>()
+        .map_err(|e| serde::de::Error::custom(format!("invalid IANA timezone `{name}`: {e}")))
 }
 
 impl Config {

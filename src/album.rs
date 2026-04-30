@@ -43,11 +43,13 @@ impl AlbumClient {
 
     /// Fetches one photo from the album, resized by Google according to `fit`.
     /// The caller picks the index via `select`, which receives the current
-    /// album size and returns an index in `[0, n)`. The returned image's
-    /// dimensions are whatever Google returned — it is the caller's job to
-    /// reconcile them with the target screen size. When `fresh` is true the
-    /// cached share-page contents are dropped before resolving, forcing a
-    /// re-scrape.
+    /// album size and a list of indices that are new since the previously
+    /// cached scrape (empty on cache hit, on first-ever scrape, or when no
+    /// photos changed). It must return an index in `[0, n)`. The returned
+    /// image's dimensions are whatever Google returned — it is the caller's
+    /// job to reconcile them with the target screen size. When `fresh` is
+    /// true the cached share-page contents are dropped before resolving,
+    /// forcing a re-scrape.
     pub async fn pick<F>(
         &self,
         width: u32,
@@ -57,11 +59,11 @@ impl AlbumClient {
         select: F,
     ) -> anyhow::Result<RgbImage>
     where
-        F: FnOnce(usize) -> usize,
+        F: FnOnce(usize, &[usize]) -> usize,
     {
-        let urls = self.photo_urls(fresh).await?;
+        let (urls, new) = self.photo_urls(fresh).await?;
         anyhow::ensure!(!urls.is_empty(), "album returned no photos");
-        let index = select(urls.len());
+        let index = select(urls.len(), &new);
         anyhow::ensure!(
             index < urls.len(),
             "selector returned out-of-range index {index}/{}",
@@ -89,13 +91,17 @@ impl AlbumClient {
             .into_rgb8())
     }
 
-    async fn photo_urls(&self, fresh: bool) -> anyhow::Result<Arc<Vec<String>>> {
+    /// Returns the album URLs and a list of indices that are new compared to
+    /// the previously cached scrape. The new-list is empty on a cache hit, on
+    /// the first-ever scrape (no prior cache to diff against), and when the
+    /// scrape returns the same set of URLs as before.
+    async fn photo_urls(&self, fresh: bool) -> anyhow::Result<(Arc<Vec<String>>, Vec<usize>)> {
         let mut guard = self.cache.lock().await;
         if !fresh
             && let Some(c) = &*guard
             && c.fetched_at.elapsed() < CACHE_TTL
         {
-            return Ok(Arc::clone(&c.urls));
+            return Ok((Arc::clone(&c.urls), Vec::new()));
         }
 
         let urls = self.scrape().await?;
@@ -105,12 +111,20 @@ impl AlbumClient {
             "no photos found on share page — is the album public?"
         );
 
+        let new = match guard.as_ref() {
+            Some(prev) => new_indices_in(&prev.urls, &urls),
+            None => Vec::new(),
+        };
+        if !new.is_empty() {
+            tracing::info!(count = new.len(), "detected new photos in album");
+        }
+
         let urls = Arc::new(urls);
         *guard = Some(Cache {
             urls: Arc::clone(&urls),
             fetched_at: Instant::now(),
         });
-        Ok(urls)
+        Ok((urls, new))
     }
 
     async fn scrape(&self) -> anyhow::Result<Vec<String>> {
@@ -152,6 +166,16 @@ fn extract_photo_urls(html: &str) -> Vec<String> {
     out
 }
 
+/// Indices in `current` whose URL does not appear in `previous`.
+fn new_indices_in(previous: &[String], current: &[String]) -> Vec<usize> {
+    let prev: HashSet<&str> = previous.iter().map(String::as_str).collect();
+    current
+        .iter()
+        .enumerate()
+        .filter_map(|(i, u)| (!prev.contains(u.as_str())).then_some(i))
+        .collect()
+}
+
 fn size_suffix(width: u32, height: u32, fit: &FitMethod) -> String {
     let modifier = match fit {
         FitMethod::Crop => "-c",
@@ -182,6 +206,36 @@ mod tests {
                 "https://lh3.googleusercontent.com/pw/DEF456".to_string(),
             ]
         );
+    }
+
+    fn s(values: &[&str]) -> Vec<String> {
+        values.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn new_indices_finds_added_photos() {
+        let prev = s(&["a", "b", "c"]);
+        let curr = s(&["a", "d", "b", "e"]);
+        assert_eq!(new_indices_in(&prev, &curr), vec![1, 3]);
+    }
+
+    #[test]
+    fn new_indices_ignores_removed_photos() {
+        let prev = s(&["a", "b", "c"]);
+        let curr = s(&["a", "c"]);
+        assert!(new_indices_in(&prev, &curr).is_empty());
+    }
+
+    #[test]
+    fn new_indices_empty_when_unchanged() {
+        let urls = s(&["a", "b", "c"]);
+        assert!(new_indices_in(&urls, &urls).is_empty());
+    }
+
+    #[test]
+    fn new_indices_all_when_previous_empty() {
+        let curr = s(&["a", "b"]);
+        assert_eq!(new_indices_in(&[], &curr), vec![0, 1]);
     }
 
     #[test]

@@ -24,7 +24,6 @@ use axum::{
     routing::get,
 };
 use chrono::{DateTime, Utc};
-use chrono_tz::Tz;
 use reqwest::Client;
 use serde::Deserialize;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -32,13 +31,12 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use album::AlbumClient;
 use config::{Config, Publish, ScreenConfig};
 use mqtt::Publisher;
-use screen_state::{ScreenState, error_refresh_target, resolve_index, resolve_tz, seconds_until};
+use screen_state::{ScreenState, error_refresh_target, seconds_until};
 
 struct Screen {
     config: ScreenConfig,
     album: AlbumClient,
     state: Mutex<ScreenState>,
-    tz: Tz,
 }
 
 #[derive(Clone)]
@@ -113,18 +111,15 @@ async fn main() -> anyhow::Result<()> {
         Publisher::connect(m, &config.screens)
     });
 
-    let now = Utc::now();
     let screens: HashMap<String, Screen> = config
         .screens
         .into_iter()
         .map(|s| {
             let album = AlbumClient::new(s.share_url.clone())?;
-            let tz = resolve_tz(s.timezone.as_deref())?;
-            let state = Mutex::new(ScreenState::fresh(s.rotate.as_ref(), &tz, now));
+            let state = Mutex::new(ScreenState::new(&s));
             let screen = Screen {
                 album,
                 state,
-                tz,
                 config: s,
             };
             Ok::<_, anyhow::Error>((screen.config.name.clone(), screen))
@@ -159,29 +154,34 @@ async fn screen_handler(
     };
 
     let now = Utc::now();
-    let (seed, cursor, next_rotation) = {
-        let mut st = screen.state.lock().expect("screen state poisoned");
-        st.maybe_rotate(screen.config.rotate.as_ref(), &screen.tz, now);
-        match q.action {
-            Some(Action::Next) => st.advance(1),
-            Some(Action::Previous) => st.advance(-1),
-            Some(Action::Refresh) | None => {}
-        }
-        (st.seed(), st.cursor(), st.next_rotation())
-    };
     let fresh = matches!(q.action, Some(Action::Refresh));
+    let advance: i64 = match q.action {
+        Some(Action::Next) => 1,
+        Some(Action::Previous) => -1,
+        _ => 0,
+    };
 
-    tracing::info!(screen = %name, ?q.action, seed, cursor, "fetching image");
+    tracing::info!(screen = %name, ?q.action, "fetching image");
     let cfg = &screen.config;
     let mut degraded = false;
+    let mut next_rotation: Option<DateTime<Utc>> = None;
 
     // Photo and weather are independent network round-trips — fire concurrently.
     let (image_result, weather_result) = tokio::join!(
         async {
             let img = screen
                 .album
-                .pick(cfg.width, cfg.height, &cfg.fit, fresh, |n| {
-                    resolve_index(seed, cursor, n)
+                .pick(cfg.width, cfg.height, &cfg.fit, fresh, |n, new| {
+                    let mut st = screen.state.lock().expect("screen state poisoned");
+                    let (idx, nr) = st.pick_index(now, advance, fresh, new, n);
+                    next_rotation = nr;
+                    tracing::info!(
+                        seed = st.seed(),
+                        cursor = st.cursor(),
+                        idx,
+                        "selected photo"
+                    );
+                    idx
                 })
                 .await?;
             background::apply(img, cfg.width, cfg.height, &cfg.background)
@@ -192,7 +192,7 @@ async fn screen_handler(
                     &state.http,
                     ibox.latitude,
                     ibox.longitude,
-                    screen.tz.name(),
+                    screen.config.timezone.name(),
                     ibox.units,
                 )
                 .await
@@ -221,7 +221,7 @@ async fn screen_handler(
     };
 
     if let Some(infobox_cfg) = &cfg.infobox {
-        infobox::apply(&mut img, infobox_cfg, &screen.tz, weather);
+        infobox::apply(&mut img, infobox_cfg, &screen.config.timezone, weather);
     }
 
     if let (Some(indicator_cfg), Some(pct)) = (&cfg.battery_indicator, q.battery_pct) {

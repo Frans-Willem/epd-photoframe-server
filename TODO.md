@@ -38,11 +38,3 @@ Spectra 6 modules and may ship with slightly different pigment
 balances; possibly even per-unit if variance between two E1002s
 turns out to matter.
 
-## Track new photos across rotations
-Keep an in-memory per-album record of which photo IDs have been seen
-so we can detect newly-added photos. On each rotation (scheduled or
-`?action=refresh`-triggered), compare the current share contents
-against the seen set; if anything is new, position the cursor on a
-freshly-added photo rather than continuing the existing shuffle.
-No need to persist this to disk — the server is intended to run
-long-term, and forgetting the seen set on a restart is acceptable.

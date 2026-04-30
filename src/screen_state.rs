@@ -1,12 +1,12 @@
+use std::collections::HashSet;
 use std::time::Duration;
 
-use anyhow::Context;
 use chrono::{DateTime, Offset, Utc};
 use chrono_tz::Tz;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng, seq::SliceRandom};
 
-use crate::config::Rotate;
+use crate::config::{Rotate, ScreenConfig};
 
 impl Rotate {
     /// Next scheduled trigger strictly after `after`, in UTC.
@@ -39,25 +39,30 @@ impl Rotate {
     }
 }
 
-/// Per-screen rotation state: the seed driving the current shuffle, the
-/// navigation cursor, and a precomputed moment at which the next scheduled
-/// rotation should fire.
+/// Per-screen rotation state. Owns the rotation schedule and timezone so
+/// callers don't have to thread them through every operation: the seed
+/// driving the current shuffle, the navigation cursor, the moment at which
+/// rotation last fired (the reference for computing the next trigger), and
+/// the schedule + tz used to evaluate it. `last_rotation == None` means the
+/// state is uninitialised (the constructor leaves `seed = 0` as a
+/// placeholder); the first call to `maybe_rotate` always fires a rotation
+/// to establish a valid seed.
 pub struct ScreenState {
     seed: u64,
     cursor: i64,
-    next_rotation: Option<DateTime<Utc>>,
+    last_rotation: Option<DateTime<Utc>>,
+    rotate: Option<Rotate>,
+    tz: Tz,
 }
 
 impl ScreenState {
-    pub fn fresh(rotate: Option<&Rotate>, tz: &Tz, now: DateTime<Utc>) -> Self {
-        let next_rotation = rotate.and_then(|r| r.next_after(now, tz));
-        if rotate.is_some() && next_rotation.is_none() {
-            tracing::warn!("rotate schedule has no future triggers");
-        }
+    pub fn new(config: &ScreenConfig) -> Self {
         Self {
-            seed: rand::rng().random(),
+            seed: 0,
             cursor: 0,
-            next_rotation,
+            last_rotation: None,
+            rotate: config.rotate.clone(),
+            tz: config.timezone,
         }
     }
 
@@ -69,49 +74,84 @@ impl ScreenState {
         self.cursor
     }
 
-    pub fn next_rotation(&self) -> Option<DateTime<Utc>> {
-        self.next_rotation
-    }
-
-    pub fn advance(&mut self, delta: i64) {
+    fn advance(&mut self, delta: i64) {
         self.cursor = self.cursor.wrapping_add(delta);
     }
 
-    /// Reseed and reset the cursor if `now` has crossed the stored
-    /// `next_rotation` moment. Advances `next_rotation` to the next trigger.
-    pub fn maybe_rotate(&mut self, rotate: Option<&Rotate>, tz: &Tz, now: DateTime<Utc>) {
-        let Some(next) = self.next_rotation else {
-            return;
+    /// The first scheduled rotation moment strictly after `since`. None when
+    /// there's no schedule or the schedule has no future triggers.
+    fn next_rotation(&self, since: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        self.rotate
+            .as_ref()
+            .and_then(|r| r.next_after(since, &self.tz))
+    }
+
+    /// Apply rotation, navigation, and (when triggered) snap-to-new in one
+    /// atomic state transition, then return the resolved photo index and the
+    /// next scheduled rotation moment. `advance` shifts the cursor (1 for
+    /// next, -1 for previous, 0 for none). On any non-passive event — a
+    /// rotation just fired, `fresh` (refresh), or a non-zero `advance`
+    /// (next/previous) — and when `new` is non-empty, the cursor is
+    /// advanced further until `resolve_index` lands on one of the new
+    /// indices, so the snap persists across subsequent requests rather than
+    /// being a one-shot override. Passive polling (plain GET, no rotation)
+    /// leaves the cursor where it is.
+    pub fn pick_index(
+        &mut self,
+        now: DateTime<Utc>,
+        advance: i64,
+        fresh: bool,
+        new: &[usize],
+        n: usize,
+    ) -> (usize, Option<DateTime<Utc>>) {
+        let rotated = self.maybe_rotate(now);
+        self.advance(advance);
+        let snap = (rotated || fresh || advance != 0) && !new.is_empty();
+        if snap {
+            let new_set: HashSet<usize> = new.iter().copied().collect();
+            for offset in 0..(n as i64) {
+                let idx = resolve_index(self.seed, self.cursor.wrapping_add(offset), n);
+                if new_set.contains(&idx) {
+                    self.advance(offset);
+                    break;
+                }
+            }
+        }
+        let nr = self
+            .last_rotation
+            .and_then(|since| self.next_rotation(since));
+        (resolve_index(self.seed, self.cursor, n), nr)
+    }
+
+    /// Reseed and reset the cursor if a scheduled trigger has elapsed since
+    /// `last_rotation`, OR if the state is uninitialised
+    /// (`last_rotation == None`, seed is the placeholder). Returns true iff
+    /// a rotation actually fired.
+    fn maybe_rotate(&mut self, now: DateTime<Utc>) -> bool {
+        let should_rotate = match self.last_rotation {
+            None => true,
+            Some(since) => self.next_rotation(since).is_some_and(|next| now >= next),
         };
-        if now < next {
-            return;
+        if !should_rotate {
+            return false;
         }
         let old_seed = self.seed;
         self.seed = rand::rng().random();
         self.cursor = 0;
-        self.next_rotation = rotate.and_then(|r| r.next_after(now, tz));
-        tracing::info!(old_seed, new_seed = self.seed, next = ?self.next_rotation, "rotated screen");
+        self.last_rotation = Some(now);
+        tracing::info!(old_seed, new_seed = self.seed, last_rotation = ?now, "rotated screen");
+        true
     }
 }
 
 /// Fisher-Yates permutation of `[0..n)` seeded by `seed`, indexed by
 /// `cursor.rem_euclid(n)`. Panics if `n == 0`.
-pub fn resolve_index(seed: u64, cursor: i64, n: usize) -> usize {
+fn resolve_index(seed: u64, cursor: i64, n: usize) -> usize {
     assert!(n > 0, "resolve_index called with empty album");
     let mut perm: Vec<usize> = (0..n).collect();
     let mut rng = StdRng::seed_from_u64(seed);
     perm.shuffle(&mut rng);
     perm[cursor.rem_euclid(n as i64) as usize]
-}
-
-/// Resolve an IANA timezone name (or the system default if None).
-pub fn resolve_tz(name: Option<&str>) -> anyhow::Result<Tz> {
-    let name = match name {
-        Some(n) => n.to_string(),
-        None => iana_time_zone::get_timezone().context("detecting system timezone")?,
-    };
-    name.parse::<Tz>()
-        .map_err(|e| anyhow::anyhow!("unknown timezone `{name}`: {e}"))
 }
 
 /// Seconds from `now` to `target`, rounded up, clamped at 0.
@@ -146,10 +186,23 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
     use std::collections::HashSet;
-    use std::str::FromStr;
 
     fn tz() -> Tz {
         "Europe/Amsterdam".parse().unwrap()
+    }
+
+    fn config(rotate_toml: &str) -> ScreenConfig {
+        toml::from_str(&format!(
+            r#"
+            name = "x"
+            width = 800
+            height = 480
+            share_url = "https://example.com"
+            timezone = "Europe/Amsterdam"
+            {rotate_toml}
+            "#
+        ))
+        .unwrap()
     }
 
     #[test]
@@ -164,54 +217,80 @@ mod tests {
     }
 
     #[test]
+    fn first_call_always_rotates() {
+        let cfg = config(r#"rotate.cron = "0 0 2 * * *""#);
+        let mut s = ScreenState::new(&cfg);
+        assert_eq!(s.seed(), 0);
+        assert!(s.last_rotation.is_none());
+        let rotated = s.maybe_rotate(Utc::now());
+        assert!(rotated);
+        assert_ne!(s.seed(), 0);
+        assert!(s.last_rotation.is_some());
+    }
+
+    #[test]
+    fn first_call_rotates_even_without_schedule() {
+        let cfg = config("");
+        let mut s = ScreenState::new(&cfg);
+        let rotated = s.maybe_rotate(Utc::now());
+        assert!(rotated);
+        assert!(s.last_rotation.is_some());
+    }
+
+    #[test]
     fn cron_rotate_fires_after_next() {
-        let rotate = Rotate::Cron(cron::Schedule::from_str("0 0 2 * * *").unwrap());
+        let cfg = config(r#"rotate.cron = "0 0 2 * * *""#);
         let tz = tz();
-        // Seed at 20 Apr 12:00 local
+        // Initialise at 20 Apr 12:00 local (first call always rotates).
         let start = tz
             .with_ymd_and_hms(2026, 4, 20, 12, 0, 0)
             .unwrap()
             .with_timezone(&Utc);
-        let mut s = ScreenState::fresh(Some(&rotate), &tz, start);
-        assert!(s.next_rotation().is_some());
-        let initial_next = s.next_rotation().unwrap();
-        // Advance past 02:00 next day
+        let mut s = ScreenState::new(&cfg);
+        s.maybe_rotate(start);
+        let seed_before = s.seed();
+        s.advance(3);
+        // Advance past 02:00 next day — should fire another rotation.
         let later = tz
             .with_ymd_and_hms(2026, 4, 21, 3, 0, 0)
             .unwrap()
             .with_timezone(&Utc);
-        let seed_before = s.seed();
-        s.advance(3);
-        s.maybe_rotate(Some(&rotate), &tz, later);
+        let rotated = s.maybe_rotate(later);
+        assert!(rotated);
         assert_eq!(s.cursor(), 0);
         assert_ne!(s.seed(), seed_before);
-        assert!(s.next_rotation().unwrap() > initial_next);
+        assert_eq!(s.last_rotation, Some(later));
     }
 
     #[test]
     fn cron_rotate_noop_before_next() {
-        let rotate = Rotate::Cron(cron::Schedule::from_str("0 0 2 * * *").unwrap());
+        let cfg = config(r#"rotate.cron = "0 0 2 * * *""#);
         let tz = tz();
         let start = tz
             .with_ymd_and_hms(2026, 4, 21, 3, 0, 0)
             .unwrap()
             .with_timezone(&Utc);
-        let mut s = ScreenState::fresh(Some(&rotate), &tz, start);
+        let mut s = ScreenState::new(&cfg);
+        s.maybe_rotate(start); // initialise; next trigger is 22 Apr 02:00
         s.advance(5);
-        let snap = (s.seed(), s.cursor(), s.next_rotation());
+        let snap = (s.seed(), s.cursor(), s.last_rotation);
+        // 10 h later is still 21 Apr 13:00, before the 22 Apr 02:00 trigger.
         let now = start + chrono::Duration::hours(10);
-        s.maybe_rotate(Some(&rotate), &tz, now);
-        assert_eq!((s.seed(), s.cursor(), s.next_rotation()), snap);
+        let rotated = s.maybe_rotate(now);
+        assert!(!rotated);
+        assert_eq!((s.seed(), s.cursor(), s.last_rotation), snap);
     }
 
     #[test]
-    fn no_schedule_means_no_rotation() {
-        let tz = tz();
-        let mut s = ScreenState::fresh(None, &tz, Utc::now());
-        assert!(s.next_rotation().is_none());
+    fn no_schedule_means_no_rotation_after_init() {
+        let cfg = config("");
+        let mut s = ScreenState::new(&cfg);
+        s.maybe_rotate(Utc::now()); // initial rotation
         s.advance(7);
-        s.maybe_rotate(None, &tz, Utc::now() + chrono::Duration::days(365));
-        assert_eq!(s.cursor(), 7);
+        let snap = (s.seed(), s.cursor(), s.last_rotation);
+        let rotated = s.maybe_rotate(Utc::now() + chrono::Duration::days(365));
+        assert!(!rotated);
+        assert_eq!((s.seed(), s.cursor(), s.last_rotation), snap);
     }
 
     #[test]
