@@ -1,6 +1,7 @@
 use chrono_tz::Tz;
 use serde::Deserialize;
 use std::collections::HashSet;
+use std::net::SocketAddr;
 use std::str::FromStr;
 use std::time::Duration;
 use tiny_skia::ColorU8;
@@ -9,12 +10,23 @@ use tiny_skia::ColorU8;
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
+    /// Address the HTTP server binds to. Accepts any `host:port` accepted by
+    /// `SocketAddr::parse` (e.g. `"0.0.0.0:3000"`, `"127.0.0.1:8080"`,
+    /// `"[::]:3000"`). Defaults to `"0.0.0.0:3000"`.
+    #[serde(default = "default_listen")]
+    pub listen: SocketAddr,
     /// Optional MQTT broker. When present, each screen's `publish` list
     /// selects which device-supplied sensor values get forwarded; one Home
     /// Assistant discovery config is emitted per enabled sensor on startup.
     #[serde(default)]
     pub mqtt: Option<MqttConfig>,
     pub screens: Vec<ScreenConfig>,
+}
+
+fn default_listen() -> SocketAddr {
+    "0.0.0.0:3000"
+        .parse()
+        .expect("default listen address must parse")
 }
 
 #[derive(Debug, Deserialize)]

@@ -105,6 +105,7 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| "config.toml".to_string());
     let config = Config::from_file(&config_path)?;
     tracing::info!(path = %config_path, screens = config.screens.len(), "loaded config");
+    let listen = config.listen;
 
     let mqtt = config.mqtt.as_ref().map(|m| {
         tracing::info!(broker = %m.broker, port = m.port, "connecting to mqtt broker");
@@ -137,7 +138,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(|| async { "ok" }))
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
+    let listener = tokio::net::TcpListener::bind(listen).await?;
     tracing::info!("listening on {}", listener.local_addr()?);
     axum::serve(listener, app).await?;
     Ok(())

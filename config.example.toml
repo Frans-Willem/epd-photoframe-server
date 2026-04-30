@@ -1,3 +1,7 @@
+# Address the HTTP server binds to. Optional; defaults to "0.0.0.0:3000".
+# Accepts any host:port that `SocketAddr::parse` accepts (IPv4, IPv6, etc.).
+# listen = "0.0.0.0:3000"
+
 # Optional. When present, screens with any `publish_*` flag will report
 # device-supplied query-string sensor values (battery, temperature, humidity)
 # to MQTT, and a Home Assistant discovery config is published once on startup
