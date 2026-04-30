@@ -443,6 +443,10 @@ pub enum NoiseSource {
     #[default]
     InterleavedGradient,
     White,
+    /// Pre-computed 256x256 high-quality blue-noise texture (HDR_L_0.png),
+    /// tiled by simple modulo over the image. Embedded into the binary at
+    /// build time.
+    Blue,
 }
 
 impl FromStr for NoiseSource {
@@ -454,6 +458,7 @@ impl FromStr for NoiseSource {
             "bayer" => Ok(Self::Bayer(None)),
             "ign" | "interleaved-gradient-noise" => Ok(Self::InterleavedGradient),
             "white" => Ok(Self::White),
+            "blue" => Ok(Self::Blue),
             _ if s.starts_with("bayer:") => {
                 let n = s["bayer:".len()..]
                     .parse::<usize>()
@@ -477,8 +482,20 @@ pub enum Strategy {
     #[default]
     OctahedronClosest,
     OctahedronFurthest,
+    /// Project onto a single fixed axis of the octahedron (0..=2), parsed
+    /// from `"octahedron-axis:<n>"`. Useful as a sanity check or to nudge
+    /// the dither toward a particular axis pair.
+    OctahedronAxis(usize),
+    /// Average the projection over all three axes. Parsed from
+    /// `"octahedron-average"`.
+    OctahedronAverage,
     NaiveMix,
     NaiveDominant,
+    /// Blend over all containing tetrahedra with weights
+    /// `α_i ∝ (∏_j w_{i,j})^p`. `p = 0` averages equally; higher `p`
+    /// concentrates on the most-interior tetrahedron. Parsed from
+    /// `"naive-tetra-blend:<p>"`.
+    NaiveTetraBlend(u32),
     /// 1-D grayscale via `PureSpreadGrayDecomposer`, parsed from
     /// `"gray-pure-spread:<r>"` with `r` in `[0, 1]`. Requires a grayscale
     /// `dither_palette`.
@@ -513,9 +530,23 @@ impl FromStr for Strategy {
                 return Ok(ctor(r));
             }
         }
+        if let Some(rest) = s.strip_prefix("octahedron-axis:") {
+            let axis: usize = rest.parse().map_err(|_| format!("invalid axis in `{s}`"))?;
+            if axis > 2 {
+                return Err(format!("axis {axis} in `{s}` out of range [0, 2]"));
+            }
+            return Ok(Self::OctahedronAxis(axis));
+        }
+        if let Some(rest) = s.strip_prefix("naive-tetra-blend:") {
+            let p: u32 = rest
+                .parse()
+                .map_err(|_| format!("invalid exponent in `{s}`"))?;
+            return Ok(Self::NaiveTetraBlend(p));
+        }
         match s {
             "octahedron-closest" => Ok(Self::OctahedronClosest),
             "octahedron-furthest" => Ok(Self::OctahedronFurthest),
+            "octahedron-average" => Ok(Self::OctahedronAverage),
             "naive-mix" => Ok(Self::NaiveMix),
             "naive-dominant" => Ok(Self::NaiveDominant),
             "grayscale" => Ok(Self::GrayOffsetBlend(0.0)),

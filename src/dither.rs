@@ -1,16 +1,28 @@
+use std::sync::LazyLock;
+
 use epd_dither::decompose::gray::{OffsetBlendGrayDecomposer, PureSpreadGrayDecomposer};
 use epd_dither::decompose::naive::{NaiveDecomposer, NaiveDecomposerStrategy};
 use epd_dither::decompose::octahedron::{OctahedronDecomposer, OctahedronDecomposerAxisStrategy};
 use epd_dither::dither::DecomposingDitherStrategy;
 use epd_dither::dither::diffuse::{ImageWriter, diffuse_dither};
 use epd_dither::image_adapter::PaletteDitheringWithNoise;
-use image::{Rgb, RgbImage};
+use image::{ImageBuffer, ImageFormat, Luma, Rgb, RgbImage};
 use nalgebra::geometry::Point3;
 use png::BitDepth;
 use rand::distr::StandardUniform;
 use rand::prelude::*;
 
 use crate::config::{DitherConfig, NoiseSource, Strategy};
+
+/// 256x256 high-quality blue-noise texture from the upstream `epd-dither`
+/// repo (`HDR_L_0.png`). Embedded into the binary, decoded once on first
+/// use, and tiled by simple `% width / % height` over the image.
+static BLUE_NOISE: LazyLock<ImageBuffer<Luma<f32>, Vec<f32>>> = LazyLock::new(|| {
+    let bytes = include_bytes!("../assets/HDR_L_0.png");
+    image::load_from_memory_with_format(bytes, ImageFormat::Png)
+        .expect("embedded HDR_L_0.png must decode")
+        .to_luma32f()
+});
 
 /// Smallest indexed PNG bit depth that can hold `palette_size` distinct indices.
 /// `BitDepth as u8` is the bits-per-pixel value for the same enum.
@@ -114,6 +126,19 @@ pub fn process(img: RgbImage, config: &DitherConfig) -> anyhow::Result<Vec<u8>> 
                 epd_dither::noise::interleaved_gradient_noise(x as f32, y as f32),
             ),
             NoiseSource::White => Some(rand::rng().sample(StandardUniform)),
+            NoiseSource::Blue => {
+                let tex = &*BLUE_NOISE;
+                let v = tex
+                    .get_pixel(x as u32 % tex.width(), y as u32 % tex.height())
+                    .0[0];
+                // HDR_L_0.png is 16-bit grayscale, so `to_luma32f` lands on
+                // one of 65536 evenly-spaced levels; add white noise scaled
+                // to one quantization step to fill the gap and avoid tied
+                // thresholds across smooth gradients.
+                const STEP: f32 = 1.0 / 65535.0;
+                let w: f32 = rand::rng().sample(StandardUniform);
+                Some(v + w * STEP)
+            }
         }
     };
 
@@ -149,6 +174,28 @@ pub fn process(img: RgbImage, config: &DitherConfig) -> anyhow::Result<Vec<u8>> 
                 true,
             );
         }
+        Strategy::OctahedronAxis(axis) => {
+            let decomposer = OctahedronDecomposer::new(&palette_points)
+                .ok_or_else(|| anyhow::anyhow!("failed to build OctahedronDecomposer"))?
+                .with_strategy(OctahedronDecomposerAxisStrategy::Axis(axis));
+            diffuse_dither(
+                DecomposingDitherStrategy::new(decomposer, color_to_point),
+                matrix,
+                &mut inout,
+                true,
+            );
+        }
+        Strategy::OctahedronAverage => {
+            let decomposer = OctahedronDecomposer::new(&palette_points)
+                .ok_or_else(|| anyhow::anyhow!("failed to build OctahedronDecomposer"))?
+                .with_strategy(OctahedronDecomposerAxisStrategy::Average);
+            diffuse_dither(
+                DecomposingDitherStrategy::new(decomposer, color_to_point),
+                matrix,
+                &mut inout,
+                true,
+            );
+        }
         Strategy::NaiveMix => {
             let decomposer = NaiveDecomposer::new(&palette_points)
                 .ok_or_else(|| anyhow::anyhow!("failed to build NaiveDecomposer"))?
@@ -164,6 +211,17 @@ pub fn process(img: RgbImage, config: &DitherConfig) -> anyhow::Result<Vec<u8>> 
             let decomposer = NaiveDecomposer::new(&palette_points)
                 .ok_or_else(|| anyhow::anyhow!("failed to build NaiveDecomposer"))?
                 .with_strategy(NaiveDecomposerStrategy::FavorDominant);
+            diffuse_dither(
+                DecomposingDitherStrategy::new(decomposer, color_to_point),
+                matrix,
+                &mut inout,
+                true,
+            );
+        }
+        Strategy::NaiveTetraBlend(p) => {
+            let decomposer = NaiveDecomposer::new(&palette_points)
+                .ok_or_else(|| anyhow::anyhow!("failed to build NaiveDecomposer"))?
+                .with_strategy(NaiveDecomposerStrategy::TetraBlend(p));
             diffuse_dither(
                 DecomposingDitherStrategy::new(decomposer, color_to_point),
                 matrix,
