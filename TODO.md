@@ -38,16 +38,6 @@ Spectra 6 modules and may ship with slightly different pigment
 balances; possibly even per-unit if variance between two E1002s
 turns out to matter.
 
-## action=refresh should refresh the album
-Today `?action=refresh` is a no-op (see the comment in
-`config.example.toml`: "?action=next / ?action=previous step the
-cursor within the current shuffle; ?action=refresh is a no-op").
-Make it a meaningful escape hatch: drop the cached album contents
-and any per-album share-page state for that screen, re-resolve the
-share URL, and render against the freshly-fetched list. Useful when
-a photo has just been added or removed in Google Photos and the
-user doesn't want to wait for the next scheduled rotation.
-
 ## Track new photos across rotations
 Keep an in-memory per-album record of which photo IDs have been seen
 so we can detect newly-added photos. On each rotation (scheduled or
