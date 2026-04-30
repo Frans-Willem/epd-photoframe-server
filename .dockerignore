@@ -1,0 +1,10 @@
+target/
+.git/
+.claude/
+.gitignore
+.dockerignore
+Dockerfile
+config.toml
+config.me.toml
+*.md
+TODO.md
