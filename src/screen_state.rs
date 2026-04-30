@@ -236,22 +236,22 @@ mod tests {
     #[test]
     fn error_refresh_target_no_schedule_uses_base() {
         let now = Utc::now();
-        let t = error_refresh_target(Duration::from_secs(3600), Duration::ZERO, None, now);
-        assert_eq!(t, now + chrono::Duration::seconds(3600));
+        let t = error_refresh_target(Duration::from_hours(1), Duration::ZERO, None, now);
+        assert_eq!(t, now + chrono::Duration::hours(1));
     }
 
     #[test]
     fn error_refresh_target_clamps_to_wake_target_when_sooner() {
         let now = Utc::now();
         // Next rotation in 10 min, wake_delay 5 min → cap is 15 min.
-        let next_rotation = now + chrono::Duration::seconds(600);
+        let next_rotation = now + chrono::Duration::minutes(10);
         let t = error_refresh_target(
-            Duration::from_secs(3600), // would-be 1 h
-            Duration::from_secs(300),
+            Duration::from_hours(1),
+            Duration::from_mins(5),
             Some(next_rotation),
             now,
         );
-        assert_eq!(t, next_rotation + chrono::Duration::seconds(300));
+        assert_eq!(t, next_rotation + chrono::Duration::minutes(5));
     }
 
     #[test]
@@ -260,11 +260,11 @@ mod tests {
         // Next rotation in 6 h → 1 h error_refresh wins.
         let next_rotation = now + chrono::Duration::hours(6);
         let t = error_refresh_target(
-            Duration::from_secs(3600),
+            Duration::from_hours(1),
             Duration::ZERO,
             Some(next_rotation),
             now,
         );
-        assert_eq!(t, now + chrono::Duration::seconds(3600));
+        assert_eq!(t, now + chrono::Duration::hours(1));
     }
 }

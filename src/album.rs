@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 
 use crate::config::FitMethod;
 
-const CACHE_TTL: Duration = Duration::from_secs(3600);
+const CACHE_TTL: Duration = Duration::from_hours(1);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
     (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";

@@ -132,7 +132,7 @@ fn default_publish() -> HashSet<Publish> {
 }
 
 fn default_error_refresh() -> Duration {
-    Duration::from_secs(3600)
+    Duration::from_hours(1)
 }
 
 fn deserialize_duration<'de, D>(d: D) -> Result<Duration, D::Error>
@@ -662,10 +662,10 @@ mod tests {
         assert_eq!(cfg.screens.len(), 2);
         assert!(matches!(cfg.screens[0].rotate, Some(Rotate::Cron(_))));
         assert!(matches!(cfg.screens[1].rotate, Some(Rotate::Natural(_))));
-        assert_eq!(cfg.screens[0].wake_delay, Duration::from_secs(3600));
+        assert_eq!(cfg.screens[0].wake_delay, Duration::from_hours(1));
         assert_eq!(cfg.screens[1].wake_delay, Duration::ZERO);
         // bedroom screen uses the default (1h); living-room sets it explicitly.
-        assert_eq!(cfg.screens[1].error_refresh, Duration::from_secs(3600));
+        assert_eq!(cfg.screens[1].error_refresh, Duration::from_hours(1));
     }
 
     #[test]

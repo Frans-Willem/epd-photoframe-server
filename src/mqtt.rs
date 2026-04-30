@@ -115,7 +115,7 @@ impl Publisher {
         if let (Some(u), Some(p)) = (&cfg.username, &cfg.password) {
             opts.set_credentials(u, p);
         }
-        opts.set_keep_alive(Duration::from_secs(60));
+        opts.set_keep_alive(Duration::from_mins(1));
 
         let (client, mut eventloop) = AsyncClient::new(opts, 256);
         tokio::spawn(async move {
