@@ -173,8 +173,8 @@ async fn screen_handler(
                 .album
                 .pick(cfg.width, cfg.height, &cfg.fit, fresh, |n, new| {
                     let mut st = screen.state.lock().expect("screen state poisoned");
-                    let (idx, nr) = st.pick_index(now, advance, fresh, new, n);
-                    next_rotation = nr;
+                    let idx = st.pick_index(now, advance, fresh, new, n);
+                    next_rotation = st.next_scheduled_rotation(now);
                     tracing::info!(
                         seed = st.seed(),
                         cursor = st.cursor(),
