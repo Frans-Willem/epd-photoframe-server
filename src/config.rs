@@ -605,9 +605,46 @@ impl DiffuseMethod {
 #[serde(rename_all = "kebab-case")]
 pub enum Palette {
     Naive,
+    /// Default Spectra 6 palette; aliases `spectra6-d65-bpc80-adjusted`
+    /// (lightness range closest to the legacy phone-camera placeholder).
     #[default]
     Spectra6,
     Epdoptimize,
+    /// Measured Spectra 6 under D50, absolute (no BPC). Panel-realistic but
+    /// narrow lightness range.
+    #[serde(rename = "spectra6-d50")]
+    Spectra6D50,
+    /// D50, BPC at α_max + L*-symmetric scaling. Lossless (no clipping).
+    #[serde(rename = "spectra6-d50-adjusted")]
+    Spectra6D50Adjusted,
+    #[serde(rename = "spectra6-d50-bpc50-adjusted")]
+    Spectra6D50Bpc50Adjusted,
+    #[serde(rename = "spectra6-d50-bpc75-adjusted")]
+    Spectra6D50Bpc75Adjusted,
+    #[serde(rename = "spectra6-d50-bpc80-adjusted")]
+    Spectra6D50Bpc80Adjusted,
+    #[serde(rename = "spectra6-d50-bpc90-adjusted")]
+    Spectra6D50Bpc90Adjusted,
+    /// D50, full BPC (α=1.00). Panel-black → (0,0,0).
+    #[serde(rename = "spectra6-d50-bpc100-adjusted")]
+    Spectra6D50Bpc100Adjusted,
+    /// Measured Spectra 6 under D65, absolute (no BPC).
+    #[serde(rename = "spectra6-d65")]
+    Spectra6D65,
+    /// D65, BPC at α_max + L*-symmetric scaling. Lossless (no clipping).
+    #[serde(rename = "spectra6-d65-adjusted")]
+    Spectra6D65Adjusted,
+    #[serde(rename = "spectra6-d65-bpc50-adjusted")]
+    Spectra6D65Bpc50Adjusted,
+    #[serde(rename = "spectra6-d65-bpc75-adjusted")]
+    Spectra6D65Bpc75Adjusted,
+    #[serde(rename = "spectra6-d65-bpc80-adjusted")]
+    Spectra6D65Bpc80Adjusted,
+    #[serde(rename = "spectra6-d65-bpc90-adjusted")]
+    Spectra6D65Bpc90Adjusted,
+    /// D65, full BPC (α=1.00). Panel-black → (0,0,0).
+    #[serde(rename = "spectra6-d65-bpc100-adjusted")]
+    Spectra6D65Bpc100Adjusted,
     /// 2-level linearly-spaced grayscale (black/white). Pair with a `gray*`
     /// strategy.
     Grayscale2,
@@ -619,10 +656,25 @@ pub enum Palette {
 
 impl Palette {
     pub fn colors(&self) -> Vec<image::Rgb<u8>> {
+        use epd_dither::spectra6;
         match self {
             Self::Naive => rgb_triples(&epd_dither::decompose::octahedron::NAIVE_RGB6),
-            Self::Spectra6 => rgb_triples(&epd_dither::decompose::octahedron::SPECTRA6),
+            Self::Spectra6 => rgb_triples(&spectra6::SPECTRA6),
             Self::Epdoptimize => rgb_triples(&epd_dither::decompose::naive::EPDOPTIMIZE),
+            Self::Spectra6D50 => rgb_triples(&spectra6::SPECTRA6_D50),
+            Self::Spectra6D50Adjusted => rgb_triples(&spectra6::SPECTRA6_D50_ADJUSTED),
+            Self::Spectra6D50Bpc50Adjusted => rgb_triples(&spectra6::SPECTRA6_D50_BPC50_ADJUSTED),
+            Self::Spectra6D50Bpc75Adjusted => rgb_triples(&spectra6::SPECTRA6_D50_BPC75_ADJUSTED),
+            Self::Spectra6D50Bpc80Adjusted => rgb_triples(&spectra6::SPECTRA6_D50_BPC80_ADJUSTED),
+            Self::Spectra6D50Bpc90Adjusted => rgb_triples(&spectra6::SPECTRA6_D50_BPC90_ADJUSTED),
+            Self::Spectra6D50Bpc100Adjusted => rgb_triples(&spectra6::SPECTRA6_D50_BPC100_ADJUSTED),
+            Self::Spectra6D65 => rgb_triples(&spectra6::SPECTRA6_D65),
+            Self::Spectra6D65Adjusted => rgb_triples(&spectra6::SPECTRA6_D65_ADJUSTED),
+            Self::Spectra6D65Bpc50Adjusted => rgb_triples(&spectra6::SPECTRA6_D65_BPC50_ADJUSTED),
+            Self::Spectra6D65Bpc75Adjusted => rgb_triples(&spectra6::SPECTRA6_D65_BPC75_ADJUSTED),
+            Self::Spectra6D65Bpc80Adjusted => rgb_triples(&spectra6::SPECTRA6_D65_BPC80_ADJUSTED),
+            Self::Spectra6D65Bpc90Adjusted => rgb_triples(&spectra6::SPECTRA6_D65_BPC90_ADJUSTED),
+            Self::Spectra6D65Bpc100Adjusted => rgb_triples(&spectra6::SPECTRA6_D65_BPC100_ADJUSTED),
             Self::Grayscale2 => gray_triples(&epd_dither::decompose::gray::GRAYSCALE2),
             Self::Grayscale4 => gray_triples(&epd_dither::decompose::gray::GRAYSCALE4),
             Self::Grayscale16 => gray_triples(&epd_dither::decompose::gray::GRAYSCALE16),
@@ -900,5 +952,25 @@ mod tests {
         let cfg: DitherConfig = toml::from_str(r#"strategy = "gray-pure-spread:0.25""#).unwrap();
         assert!(matches!(cfg.dither_palette, Palette::Grayscale4));
         assert!(matches!(cfg.output_palette, Palette::Grayscale4));
+    }
+
+    #[test]
+    fn measured_spectra6_variants_parse_and_resolve() {
+        let cfg: DitherConfig =
+            toml::from_str(r#"dither_palette = "spectra6-d65-bpc100-adjusted""#).unwrap();
+        assert!(matches!(
+            cfg.dither_palette,
+            Palette::Spectra6D65Bpc100Adjusted
+        ));
+        // Full BPC pins panel-black to (0,0,0).
+        assert_eq!(cfg.dither_palette.colors()[0], image::Rgb([0, 0, 0]));
+    }
+
+    #[test]
+    fn spectra6_alias_matches_d65_bpc80() {
+        assert_eq!(
+            Palette::Spectra6.colors(),
+            Palette::Spectra6D65Bpc80Adjusted.colors()
+        );
     }
 }

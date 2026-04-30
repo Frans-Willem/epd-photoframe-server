@@ -129,6 +129,15 @@ diffuse = "floyd-steinberg"     # none | floyd-steinberg | jarvis-judice-and-nin
 # only when they should differ — see the bedroom screen below for the
 # epdoptimize-to-spectra6 case.
 #   naive | spectra6 | epdoptimize | grayscale2 | grayscale4 | grayscale16
+# Measured Spectra 6 variants from the upstream calibration session, keyed
+# by illuminant (D50 / D65) and BPC strength. `spectra6` is an alias for
+# `spectra6-d65-bpc80-adjusted` (closest to the legacy phone-camera
+# placeholder); for panel-realistic chromaticity without clipping prefer
+# `*-adjusted` (BPC at α_max).
+#   spectra6-d50  | spectra6-d50-adjusted
+#   spectra6-d50-bpc{50,75,80,90,100}-adjusted
+#   spectra6-d65  | spectra6-d65-adjusted
+#   spectra6-d65-bpc{50,75,80,90,100}-adjusted
 dither_palette = "spectra6"
 
 [[screens]]
