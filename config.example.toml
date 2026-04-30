@@ -44,8 +44,10 @@ background = "#FFFFFF"
 # or a cron-lingo natural-language phrase (see the bedroom screen below).
 # Omit the `rotate` key entirely to keep a single shuffle until restart.
 # Requests with ?action=next / ?action=previous step the cursor within the
-# current shuffle; ?action=refresh is a no-op; a plain GET (power-on or
-# timer wake) re-renders the current photo. Every response carries a
+# current shuffle; ?action=refresh drops the cached share-page contents and
+# re-scrapes before rendering, so a freshly added/removed photo shows up
+# without waiting for the next scheduled rotation; a plain GET (power-on
+# or timer wake) re-renders the current photo. Every response carries a
 # Refresh header pointing the device at its next wake-up.
 rotate.cron = "0 0 2,14 * * *"
 # How much later than the next scheduled rotation the device is instructed

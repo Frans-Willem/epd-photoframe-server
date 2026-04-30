@@ -45,18 +45,21 @@ impl AlbumClient {
     /// The caller picks the index via `select`, which receives the current
     /// album size and returns an index in `[0, n)`. The returned image's
     /// dimensions are whatever Google returned — it is the caller's job to
-    /// reconcile them with the target screen size.
+    /// reconcile them with the target screen size. When `fresh` is true the
+    /// cached share-page contents are dropped before resolving, forcing a
+    /// re-scrape.
     pub async fn pick<F>(
         &self,
         width: u32,
         height: u32,
         fit: &FitMethod,
+        fresh: bool,
         select: F,
     ) -> anyhow::Result<RgbImage>
     where
         F: FnOnce(usize) -> usize,
     {
-        let urls = self.photo_urls().await?;
+        let urls = self.photo_urls(fresh).await?;
         anyhow::ensure!(!urls.is_empty(), "album returned no photos");
         let index = select(urls.len());
         anyhow::ensure!(
@@ -86,9 +89,10 @@ impl AlbumClient {
             .into_rgb8())
     }
 
-    async fn photo_urls(&self) -> anyhow::Result<Arc<Vec<String>>> {
+    async fn photo_urls(&self, fresh: bool) -> anyhow::Result<Arc<Vec<String>>> {
         let mut guard = self.cache.lock().await;
-        if let Some(c) = &*guard
+        if !fresh
+            && let Some(c) = &*guard
             && c.fetched_at.elapsed() < CACHE_TTL
         {
             return Ok(Arc::clone(&c.urls));

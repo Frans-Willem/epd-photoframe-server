@@ -169,6 +169,7 @@ async fn screen_handler(
         }
         (st.seed(), st.cursor(), st.next_rotation())
     };
+    let fresh = matches!(q.action, Some(Action::Refresh));
 
     tracing::info!(screen = %name, ?q.action, seed, cursor, "fetching image");
     let cfg = &screen.config;
@@ -179,7 +180,7 @@ async fn screen_handler(
         async {
             let img = screen
                 .album
-                .pick(cfg.width, cfg.height, &cfg.fit, |n| {
+                .pick(cfg.width, cfg.height, &cfg.fit, fresh, |n| {
                     resolve_index(seed, cursor, n)
                 })
                 .await?;
