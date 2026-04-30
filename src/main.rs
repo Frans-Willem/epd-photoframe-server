@@ -133,7 +133,7 @@ async fn main() -> anyhow::Result<()> {
 
     let state = AppState {
         screens: Arc::new(screens),
-        http: Client::builder().build()?,
+        http: Client::builder().timeout(Duration::from_secs(30)).build()?,
         mqtt,
     };
 
