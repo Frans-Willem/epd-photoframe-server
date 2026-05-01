@@ -245,7 +245,6 @@ impl ColorConfig {
         Self(ColorU8::from_rgba(r, g, b, 255))
     }
 
-    #[allow(dead_code)]
     pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
         Self(ColorU8::from_rgba(r, g, b, a))
     }
