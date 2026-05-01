@@ -1,18 +1,19 @@
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
+use epd_dither::decompose::Decomposer;
 use epd_dither::decompose::gray::{OffsetBlendGrayDecomposer, PureSpreadGrayDecomposer};
 use epd_dither::decompose::naive::{NaiveDecomposer, NaiveDecomposerStrategy};
 use epd_dither::decompose::octahedron::{OctahedronDecomposer, OctahedronDecomposerAxisStrategy};
 use epd_dither::dither::DecomposingDitherStrategy;
-use epd_dither::dither::diffuse::{ImageWriter, diffuse_dither};
+use epd_dither::dither::diffuse::diffuse_dither;
 use epd_dither::image_adapter::PaletteDitheringWithNoise;
 use image::{ImageBuffer, ImageFormat, Luma, Rgb, RgbImage};
 use nalgebra::geometry::Point3;
-use png::BitDepth;
 use rand::distr::StandardUniform;
 use rand::prelude::*;
 
 use crate::config::{DitherConfig, NoiseSource, Strategy};
+use crate::palette_image::{PaletteImage, VerifiedPalette};
 
 /// 256x256 high-quality blue-noise texture from the upstream `epd-dither`
 /// repo (`HDR_L_0.png`). Embedded into the binary, decoded once on first
@@ -23,17 +24,6 @@ static BLUE_NOISE: LazyLock<ImageBuffer<Luma<f32>, Vec<f32>>> = LazyLock::new(||
         .expect("embedded HDR_L_0.png must decode")
         .to_luma32f()
 });
-
-/// Smallest indexed PNG bit depth that can hold `palette_size` distinct indices.
-/// `BitDepth as u8` is the bits-per-pixel value for the same enum.
-fn bit_depth_for(palette_size: usize) -> BitDepth {
-    match palette_size {
-        0..=2 => BitDepth::One,
-        3..=4 => BitDepth::Two,
-        5..=16 => BitDepth::Four,
-        _ => BitDepth::Eight,
-    }
-}
 
 fn color_to_point(color: Rgb<u8>) -> Point3<f32> {
     let [r, g, b] = color.0;
@@ -76,270 +66,175 @@ fn grayscale_levels(palette: &[Rgb<u8>]) -> anyhow::Result<Vec<f32>> {
     Ok(levels)
 }
 
-/// `ImageWriter<usize>` sink that packs palette indices MSB-first into the
-/// indexed-PNG byte layout (each scanline byte-aligned). Pre-allocated to the
-/// packed size on construction.
-struct PackedIndexWriter {
-    bits_per_pixel: u8,
-    bytes_per_row: usize,
-    target: Vec<u8>,
+type BoxedPixelStrategy = Box<
+    dyn epd_dither::dither::diffuse::PixelStrategy<
+            Source = (Rgb<u8>, Option<f32>),
+            Target = usize,
+            QuantizationError = epd_dither::dither::decomposing::DecomposedQuantizationError,
+        > + Sync
+        + Send,
+>;
+
+/// A dither pipeline pre-configured for one screen. Built once at boot from
+/// a `DitherConfig`; palette / strategy / level validation runs inside
+/// `prepare` so misconfiguration surfaces at startup. Run-time errors are
+/// still propagated as `Result` rather than panicking — boot validation
+/// catches them early but isn't a substitute for runtime error handling.
+///
+/// Cheap to clone — it's an `Arc` under the hood.
+#[derive(Clone)]
+pub struct PreparedDitherMethod {
+    inner: Arc<dyn Fn(RgbImage) -> anyhow::Result<PaletteImage> + Send + Sync>,
 }
 
-impl PackedIndexWriter {
-    fn new(width: usize, height: usize, bits_per_pixel: u8) -> Self {
-        let px_per_byte = 8 / bits_per_pixel as usize;
-        let bytes_per_row = width.div_ceil(px_per_byte);
-        Self {
-            bits_per_pixel,
-            bytes_per_row,
-            target: vec![0u8; bytes_per_row * height],
-        }
+impl PreparedDitherMethod {
+    pub fn prepare(config: &DitherConfig) -> anyhow::Result<Self> {
+        let dither_palette = config.dither_palette.colors();
+        let output_palette = VerifiedPalette::new(config.output_palette.colors())?;
+
+        let pixel_strategy = build_pixel_strategy(&config.strategy, &dither_palette)?;
+
+        let noise = build_noise_fn(config.noise.clone());
+        let matrix = config.diffuse.to_boxed_matrix();
+
+        let inner = Arc::new(move |img: RgbImage| -> anyhow::Result<PaletteImage> {
+            let (width, height) = (img.width(), img.height());
+            let writer = PaletteImage::new(width, height, output_palette.clone());
+            let mut inout = PaletteDitheringWithNoise {
+                image: img,
+                noise_fn: &noise,
+                writer,
+            };
+            diffuse_dither(pixel_strategy.as_ref(), matrix.as_ref(), &mut inout, true);
+            Ok(inout.writer)
+        });
+
+        Ok(Self { inner })
+    }
+
+    /// Run the prepared pipeline on an image. Errors here are runtime issues
+    /// (allocation, internal invariants); configuration errors were filtered
+    /// out at `prepare` time, but the result is `Result` so request handlers
+    /// can turn unexpected failures into 500s rather than panicking.
+    pub fn run(&self, img: RgbImage) -> anyhow::Result<PaletteImage> {
+        (self.inner)(img)
     }
 }
 
-impl ImageWriter<usize> for PackedIndexWriter {
-    fn put_pixel(&mut self, x: usize, y: usize, pixel: usize) {
-        let bpp = self.bits_per_pixel as usize;
-        let px_per_byte = 8 / bpp;
-        let byte_x = x / px_per_byte;
-        // MSB-first: the leftmost pixel occupies the highest bits.
-        let shift = (px_per_byte - 1 - (x % px_per_byte)) * bpp;
-        let mask = ((1u32 << bpp) - 1) as u8;
-        let byte = &mut self.target[y * self.bytes_per_row + byte_x];
-        *byte = (*byte & !(mask << shift)) | (((pixel as u8) & mask) << shift);
-    }
-}
-
-/// Dither `img` and return an indexed PNG at the image's own dimensions.
-pub fn process(img: RgbImage, config: &DitherConfig) -> anyhow::Result<Vec<u8>> {
-    let dither_palette = config.dither_palette.colors();
-    let palette_points: Vec<Point3<f32>> =
-        dither_palette.iter().copied().map(color_to_point).collect();
-
-    let noise = config.noise.clone();
-    let noise_fn = move |x: usize, y: usize| -> Option<f32> {
-        match &noise {
-            NoiseSource::None => None,
-            NoiseSource::Bayer(Some(n)) => Some(epd_dither::noise::bayer(x, y, *n)),
-            NoiseSource::Bayer(None) => Some(epd_dither::noise::bayer_inf(x, y)),
-            NoiseSource::InterleavedGradient => Some(
-                epd_dither::noise::interleaved_gradient_noise(x as f32, y as f32),
-            ),
-            NoiseSource::White => Some(rand::rng().sample(StandardUniform)),
-            NoiseSource::Blue => {
-                let tex = &*BLUE_NOISE;
-                let v = tex
-                    .get_pixel(x as u32 % tex.width(), y as u32 % tex.height())
-                    .0[0];
-                // HDR_L_0.png is 16-bit grayscale, so `to_luma32f` lands on
-                // one of 65536 evenly-spaced levels; add white noise scaled
-                // to one quantization step to fill the gap and avoid tied
-                // thresholds across smooth gradients.
-                const STEP: f32 = 1.0 / 65535.0;
-                let w: f32 = rand::rng().sample(StandardUniform);
-                Some(v + w * STEP)
-            }
-        }
-    };
-
-    let (width, height) = (img.width() as usize, img.height() as usize);
-    let bit_depth = bit_depth_for(palette_points.len());
-    let mut inout = PaletteDitheringWithNoise {
-        image: img,
-        noise_fn,
-        writer: PackedIndexWriter::new(width, height, bit_depth as u8),
-    };
-    let matrix = config.diffuse.to_boxed_matrix();
-
-    match config.strategy {
+fn build_pixel_strategy(
+    strategy: &Strategy,
+    dither_palette: &[Rgb<u8>],
+) -> anyhow::Result<BoxedPixelStrategy> {
+    Ok(match *strategy {
         Strategy::OctahedronClosest => {
-            let decomposer = OctahedronDecomposer::new(&palette_points)
-                .ok_or_else(|| anyhow::anyhow!("failed to build OctahedronDecomposer"))?
-                .with_strategy(OctahedronDecomposerAxisStrategy::Closest);
-            diffuse_dither(
-                DecomposingDitherStrategy::new(decomposer, color_to_point),
-                matrix,
-                &mut inout,
-                true,
-            );
+            octahedron_with(dither_palette, OctahedronDecomposerAxisStrategy::Closest)?
         }
         Strategy::OctahedronFurthest => {
-            let decomposer = OctahedronDecomposer::new(&palette_points)
-                .ok_or_else(|| anyhow::anyhow!("failed to build OctahedronDecomposer"))?
-                .with_strategy(OctahedronDecomposerAxisStrategy::Furthest);
-            diffuse_dither(
-                DecomposingDitherStrategy::new(decomposer, color_to_point),
-                matrix,
-                &mut inout,
-                true,
-            );
+            octahedron_with(dither_palette, OctahedronDecomposerAxisStrategy::Furthest)?
         }
         Strategy::OctahedronAxis(axis) => {
-            let decomposer = OctahedronDecomposer::new(&palette_points)
-                .ok_or_else(|| anyhow::anyhow!("failed to build OctahedronDecomposer"))?
-                .with_strategy(OctahedronDecomposerAxisStrategy::Axis(axis));
-            diffuse_dither(
-                DecomposingDitherStrategy::new(decomposer, color_to_point),
-                matrix,
-                &mut inout,
-                true,
-            );
+            octahedron_with(dither_palette, OctahedronDecomposerAxisStrategy::Axis(axis))?
         }
         Strategy::OctahedronAverage => {
-            let decomposer = OctahedronDecomposer::new(&palette_points)
-                .ok_or_else(|| anyhow::anyhow!("failed to build OctahedronDecomposer"))?
-                .with_strategy(OctahedronDecomposerAxisStrategy::Average);
-            diffuse_dither(
-                DecomposingDitherStrategy::new(decomposer, color_to_point),
-                matrix,
-                &mut inout,
-                true,
-            );
+            octahedron_with(dither_palette, OctahedronDecomposerAxisStrategy::Average)?
         }
-        Strategy::NaiveMix => {
-            let decomposer = NaiveDecomposer::new(&palette_points)
-                .ok_or_else(|| anyhow::anyhow!("failed to build NaiveDecomposer"))?
-                .with_strategy(NaiveDecomposerStrategy::FavorMix);
-            diffuse_dither(
-                DecomposingDitherStrategy::new(decomposer, color_to_point),
-                matrix,
-                &mut inout,
-                true,
-            );
-        }
+        Strategy::NaiveMix => naive_with(dither_palette, NaiveDecomposerStrategy::FavorMix)?,
         Strategy::NaiveDominant => {
-            let decomposer = NaiveDecomposer::new(&palette_points)
-                .ok_or_else(|| anyhow::anyhow!("failed to build NaiveDecomposer"))?
-                .with_strategy(NaiveDecomposerStrategy::FavorDominant);
-            diffuse_dither(
-                DecomposingDitherStrategy::new(decomposer, color_to_point),
-                matrix,
-                &mut inout,
-                true,
-            );
+            naive_with(dither_palette, NaiveDecomposerStrategy::FavorDominant)?
         }
         Strategy::NaiveTetraBlend(p) => {
-            let decomposer = NaiveDecomposer::new(&palette_points)
-                .ok_or_else(|| anyhow::anyhow!("failed to build NaiveDecomposer"))?
-                .with_strategy(NaiveDecomposerStrategy::TetraBlend(p));
-            diffuse_dither(
-                DecomposingDitherStrategy::new(decomposer, color_to_point),
-                matrix,
-                &mut inout,
-                true,
-            );
+            naive_with(dither_palette, NaiveDecomposerStrategy::TetraBlend(p))?
         }
-        Strategy::GrayPureSpread(spread) => {
-            let levels = grayscale_levels(&dither_palette)?;
-            let decomposer = PureSpreadGrayDecomposer::new(levels)
-                .ok_or_else(|| anyhow::anyhow!("failed to build PureSpreadGrayDecomposer"))?
-                .with_spread_ratio(spread);
-            diffuse_dither(
-                DecomposingDitherStrategy::new(decomposer, rgb_to_brightness),
-                matrix,
-                &mut inout,
-                true,
-            );
+        Strategy::GrayPureSpread(spread) => grayscale_with(dither_palette, |levels| {
+            Ok(PureSpreadGrayDecomposer::new(levels)
+                .ok_or_else(|| anyhow::anyhow!("PureSpreadGrayDecomposer build failed"))?
+                .with_spread_ratio(spread))
+        })?,
+        Strategy::GrayOffsetBlend(distance) => grayscale_with(dither_palette, |levels| {
+            Ok(OffsetBlendGrayDecomposer::new(levels)
+                .ok_or_else(|| anyhow::anyhow!("OffsetBlendGrayDecomposer build failed"))?
+                .with_distance(distance))
+        })?,
+    })
+}
+
+fn octahedron_with(
+    palette: &[Rgb<u8>],
+    axis: OctahedronDecomposerAxisStrategy,
+) -> anyhow::Result<BoxedPixelStrategy> {
+    let palette_points: Vec<_> = palette.iter().copied().map(color_to_point).collect();
+    Ok(Box::new(DecomposingDitherStrategy::new(
+        OctahedronDecomposer::new(palette_points.as_slice())
+            .ok_or_else(|| anyhow::anyhow!("OctahedronDecomposer build failed"))?
+            .with_strategy(axis),
+        color_to_point,
+    )))
+}
+
+fn naive_with(
+    palette: &[Rgb<u8>],
+    strategy: NaiveDecomposerStrategy,
+) -> anyhow::Result<BoxedPixelStrategy> {
+    let palette_points: Vec<_> = palette.iter().copied().map(color_to_point).collect();
+    Ok(Box::new(DecomposingDitherStrategy::new(
+        NaiveDecomposer::new(palette_points.as_slice())
+            .ok_or_else(|| anyhow::anyhow!("NaiveDecomposer build failed"))?
+            .with_strategy(strategy),
+        color_to_point,
+    )))
+}
+
+fn grayscale_with<
+    D: Decomposer<f32, Input = f32> + Send + Sync + 'static,
+    F: Fn(Vec<f32>) -> anyhow::Result<D>,
+>(
+    palette: &[Rgb<u8>],
+    strategy: F,
+) -> anyhow::Result<BoxedPixelStrategy> {
+    let levels = grayscale_levels(palette)?;
+    Ok(Box::new(DecomposingDitherStrategy::new(
+        strategy(levels)?,
+        rgb_to_brightness,
+    )))
+}
+
+type BoxedNoiseFn = Box<dyn Fn(usize, usize) -> Option<f32> + Send + Sync>;
+
+fn build_noise_fn(noise: NoiseSource) -> BoxedNoiseFn {
+    match &noise {
+        NoiseSource::None => Box::new(|_, _| None),
+        NoiseSource::Bayer(Some(n)) => {
+            let n = *n;
+            Box::new(move |x, y| Some(epd_dither::noise::bayer(x, y, n)))
         }
-        Strategy::GrayOffsetBlend(distance) => {
-            let levels = grayscale_levels(&dither_palette)?;
-            let decomposer = OffsetBlendGrayDecomposer::new(levels)
-                .ok_or_else(|| anyhow::anyhow!("failed to build OffsetBlendGrayDecomposer"))?
-                .with_distance(distance);
-            diffuse_dither(
-                DecomposingDitherStrategy::new(decomposer, rgb_to_brightness),
-                matrix,
-                &mut inout,
-                true,
-            );
-        }
+        NoiseSource::Bayer(None) => Box::new(|x, y| Some(epd_dither::noise::bayer_inf(x, y))),
+        NoiseSource::InterleavedGradient => Box::new(|x, y| {
+            Some(epd_dither::noise::interleaved_gradient_noise(
+                x as f32, y as f32,
+            ))
+        }),
+        NoiseSource::White => Box::new(|_, _| Some(rand::rng().sample(StandardUniform))),
+        NoiseSource::Blue => Box::new(|x, y| {
+            let v = BLUE_NOISE
+                .get_pixel(
+                    x as u32 % BLUE_NOISE.width(),
+                    y as u32 % BLUE_NOISE.height(),
+                )
+                .0[0];
+            // HDR_L_0.png is 16-bit grayscale, so `to_luma32f` lands on
+            // one of 65536 evenly-spaced levels; add white noise scaled
+            // to one quantization step to fill the gap and avoid tied
+            // thresholds across smooth gradients.
+            const STEP: f32 = 1.0 / 65535.0;
+            let w: f32 = rand::rng().sample(StandardUniform);
+            Some(v + w * STEP)
+        }),
     }
-
-    // Encode as indexed PNG; writer.target is already packed at `bit_depth`.
-    let mut png_bytes: Vec<u8> = Vec::new();
-    let mut encoder = png::Encoder::new(
-        std::io::BufWriter::new(&mut png_bytes),
-        inout.image.width(),
-        inout.image.height(),
-    );
-    encoder.set_color(png::ColorType::Indexed);
-    encoder.set_depth(bit_depth);
-    let palette_bytes: Vec<u8> = config
-        .output_palette
-        .colors()
-        .iter()
-        .flat_map(|rgb| rgb.0)
-        .collect();
-    encoder.set_palette(palette_bytes);
-    let mut writer = encoder.write_header()?;
-    writer.write_image_data(&inout.writer.target)?;
-    drop(writer);
-
-    Ok(png_bytes)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn writer(width: u32, height: u32, bpp: u8) -> PackedIndexWriter {
-        PackedIndexWriter::new(width as usize, height as usize, bpp)
-    }
-
-    #[test]
-    fn bit_depth_for_palette_sizes() {
-        assert_eq!(bit_depth_for(2), BitDepth::One);
-        assert_eq!(bit_depth_for(4), BitDepth::Two);
-        assert_eq!(bit_depth_for(6), BitDepth::Four);
-        assert_eq!(bit_depth_for(16), BitDepth::Four);
-        assert_eq!(bit_depth_for(17), BitDepth::Eight);
-    }
-
-    #[test]
-    fn pack_8bit_writes_one_byte_per_pixel() {
-        let mut w = writer(3, 2, 8);
-        w.put_pixel(0, 0, 0xAA);
-        w.put_pixel(2, 1, 0xBB);
-        assert_eq!(w.target, vec![0xAA, 0, 0, 0, 0, 0xBB]);
-    }
-
-    #[test]
-    fn pack_4bit_msb_first_and_rounds_rows() {
-        let mut w = writer(3, 1, 4);
-        w.put_pixel(0, 0, 0x0);
-        w.put_pixel(1, 0, 0xA);
-        w.put_pixel(2, 0, 0x5);
-        // Row has 3 pixels at 4 bpp => 2 bytes (second byte's low nibble is padding).
-        assert_eq!(w.target, vec![0x0A, 0x50]);
-    }
-
-    #[test]
-    fn pack_2bit_packs_four_per_byte() {
-        let mut w = writer(5, 1, 2);
-        for (x, v) in [0usize, 1, 2, 3, 1].iter().enumerate() {
-            w.put_pixel(x, 0, *v);
-        }
-        // 00 01 10 11 | 01 00 00 00  =>  0b00011011, 0b01000000
-        assert_eq!(w.target, vec![0b00_01_10_11, 0b01_00_00_00]);
-    }
-
-    #[test]
-    fn pack_1bit_msb_first() {
-        let mut w = writer(9, 1, 1);
-        for (x, v) in [1usize, 0, 1, 1, 0, 0, 1, 0, 1].iter().enumerate() {
-            w.put_pixel(x, 0, *v);
-        }
-        // 10110010 | 10000000
-        assert_eq!(w.target, vec![0b1011_0010, 0b1000_0000]);
-    }
-
-    #[test]
-    fn put_pixel_overwrites_on_repeat() {
-        let mut w = writer(2, 1, 4);
-        w.put_pixel(0, 0, 0xF);
-        w.put_pixel(0, 0, 0x3);
-        assert_eq!(w.target, vec![0x30]);
-    }
 
     #[test]
     fn grayscale_levels_rejects_chromatic_entries() {
@@ -354,7 +249,7 @@ mod tests {
     }
 
     #[test]
-    fn process_gray_pipeline_produces_indexed_png() {
+    fn prepared_gray_pipeline_produces_indexed_png() {
         use crate::config::{DiffuseMethod, NoiseSource, Palette, Strategy};
 
         let img = RgbImage::from_pixel(8, 4, Rgb([128, 128, 128]));
@@ -365,7 +260,12 @@ mod tests {
             dither_palette: Palette::Grayscale4,
             output_palette: Palette::Grayscale4,
         };
-        let png_bytes = process(img, &cfg).expect("gray pipeline should succeed");
+        let prepared = PreparedDitherMethod::prepare(&cfg).expect("prepare should succeed");
+        let png_bytes = prepared
+            .run(img)
+            .expect("dither should succeed")
+            .to_png()
+            .expect("encoding should succeed");
         // PNG magic.
         assert_eq!(&png_bytes[..8], b"\x89PNG\r\n\x1a\n");
     }

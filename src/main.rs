@@ -7,6 +7,7 @@ mod dither;
 mod infobox;
 mod mqtt;
 mod overlay;
+mod palette_image;
 mod screen_state;
 mod weather;
 
@@ -15,6 +16,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use anyhow::Context;
 use axum::{
     Router,
     extract::{OriginalUri, Path, Query, State},
@@ -29,6 +31,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use album::AlbumClient;
 use config::{Config, Publish, ScreenConfig};
+use dither::PreparedDitherMethod;
 use mqtt::Publisher;
 use screen_state::{ScreenState, error_refresh_target, seconds_until};
 
@@ -36,6 +39,7 @@ struct Screen {
     config: ScreenConfig,
     album: AlbumClient,
     state: Mutex<ScreenState>,
+    dither_method: PreparedDitherMethod,
 }
 
 #[derive(Clone)]
@@ -127,9 +131,12 @@ async fn main() -> anyhow::Result<()> {
         .map(|s| {
             let album = AlbumClient::new(s.share_url.clone())?;
             let state = Mutex::new(ScreenState::new(&s));
+            let dither_method = PreparedDitherMethod::prepare(&s.dither)
+                .with_context(|| format!("preparing dither for screen `{}`", s.name))?;
             let screen = Screen {
                 album,
                 state,
+                dither_method,
                 config: s,
             };
             Ok::<_, anyhow::Error>((screen.config.name.clone(), screen))
@@ -270,8 +277,8 @@ async fn screen_handler(
     }
 
     let png = match tokio::task::spawn_blocking({
-        let dither_cfg = cfg.dither.clone();
-        move || dither::process(img, &dither_cfg)
+        let dither_method = screen.dither_method.clone();
+        move || dither_method.run(img).and_then(|p| p.to_png())
     })
     .await
     {

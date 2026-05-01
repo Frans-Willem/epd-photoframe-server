@@ -290,7 +290,14 @@ mod tests {
         assert!(p.unit.is_none());
         assert_eq!(
             p.options.as_deref(),
-            Some(&["battery".to_string(), "charging".to_string(), "full".to_string(), "fault".to_string()][..])
+            Some(
+                &[
+                    "battery".to_string(),
+                    "charging".to_string(),
+                    "full".to_string(),
+                    "fault".to_string()
+                ][..]
+            )
         );
     }
 

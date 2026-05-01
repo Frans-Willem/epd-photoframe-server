@@ -596,7 +596,7 @@ pub enum DiffuseMethod {
 impl DiffuseMethod {
     pub fn to_boxed_matrix(
         &self,
-    ) -> Box<dyn epd_dither::dither::diffusion_matrix::DiffusionMatrix> {
+    ) -> Box<dyn epd_dither::dither::diffusion_matrix::DiffusionMatrix + Send + Sync> {
         match self {
             Self::None => Box::new(epd_dither::dither::diffusion_matrix::NoDiffuse),
             Self::FloydSteinberg => Box::new(epd_dither::dither::diffusion_matrix::FloydSteinberg),
