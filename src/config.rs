@@ -1,9 +1,9 @@
+use chrono::Duration;
 use chrono_tz::Tz;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::str::FromStr;
-use std::time::Duration;
 use tiny_skia::ColorU8;
 
 // ----- Top-level config -----------------------------------------------------
@@ -148,7 +148,7 @@ fn default_publish() -> HashSet<Publish> {
 }
 
 fn default_error_refresh() -> Duration {
-    Duration::from_hours(1)
+    Duration::hours(1)
 }
 
 fn deserialize_duration<'de, D>(d: D) -> Result<Duration, D::Error>
@@ -156,7 +156,16 @@ where
     D: serde::Deserializer<'de>,
 {
     let s = String::deserialize(d)?;
-    humantime::parse_duration(&s).map_err(serde::de::Error::custom)
+    let std_dur = humantime::parse_duration(&s).map_err(serde::de::Error::custom)?;
+    // chrono's TimeDelta is i64-milliseconds, so values larger than ~292M
+    // years can't be represented. humantime accepts them (its u64 seconds
+    // range is much wider), so reject them here at config load — every
+    // runtime use of these durations adds them to a `DateTime<Utc>`.
+    Duration::from_std(std_dur).map_err(|_| {
+        serde::de::Error::custom(format!(
+            "duration `{s}` exceeds chrono representable range (max ~292M years)"
+        ))
+    })
 }
 
 fn default_timezone() -> Tz {
@@ -776,10 +785,10 @@ mod tests {
         assert_eq!(cfg.screens.len(), 2);
         assert!(matches!(cfg.screens[0].rotate, Some(Rotate::Cron(_))));
         assert!(matches!(cfg.screens[1].rotate, Some(Rotate::Natural(_))));
-        assert_eq!(cfg.screens[0].wake_delay, Duration::from_hours(1));
-        assert_eq!(cfg.screens[1].wake_delay, Duration::ZERO);
+        assert_eq!(cfg.screens[0].wake_delay, Duration::hours(1));
+        assert_eq!(cfg.screens[1].wake_delay, Duration::zero());
         // bedroom screen uses the default (1h); living-room sets it explicitly.
-        assert_eq!(cfg.screens[1].error_refresh, Duration::from_hours(1));
+        assert_eq!(cfg.screens[1].error_refresh, Duration::hours(1));
     }
 
     #[test]

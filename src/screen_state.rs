@@ -1,7 +1,6 @@
 use std::collections::HashSet;
-use std::time::Duration;
 
-use chrono::{DateTime, Offset, Utc};
+use chrono::{DateTime, Duration, Offset, Utc};
 use chrono_tz::Tz;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng, seq::SliceRandom};
@@ -181,12 +180,9 @@ pub fn error_refresh_target(
     next_rotation: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
 ) -> DateTime<Utc> {
-    let base = now + chrono::Duration::from_std(error_refresh).unwrap_or_default();
+    let base = now + error_refresh;
     match next_rotation {
-        Some(n) => {
-            let cap = n + chrono::Duration::from_std(wake_delay).unwrap_or_default();
-            base.min(cap)
-        }
+        Some(n) => base.min(n + wake_delay),
         None => base,
     }
 }
@@ -364,35 +360,35 @@ mod tests {
     #[test]
     fn error_refresh_target_no_schedule_uses_base() {
         let now = Utc::now();
-        let t = error_refresh_target(Duration::from_hours(1), Duration::ZERO, None, now);
-        assert_eq!(t, now + chrono::Duration::hours(1));
+        let t = error_refresh_target(Duration::hours(1), Duration::zero(), None, now);
+        assert_eq!(t, now + Duration::hours(1));
     }
 
     #[test]
     fn error_refresh_target_clamps_to_wake_target_when_sooner() {
         let now = Utc::now();
         // Next rotation in 10 min, wake_delay 5 min → cap is 15 min.
-        let next_rotation = now + chrono::Duration::minutes(10);
+        let next_rotation = now + Duration::minutes(10);
         let t = error_refresh_target(
-            Duration::from_hours(1),
-            Duration::from_mins(5),
+            Duration::hours(1),
+            Duration::minutes(5),
             Some(next_rotation),
             now,
         );
-        assert_eq!(t, next_rotation + chrono::Duration::minutes(5));
+        assert_eq!(t, next_rotation + Duration::minutes(5));
     }
 
     #[test]
     fn error_refresh_target_uses_base_when_wake_target_is_later() {
         let now = Utc::now();
         // Next rotation in 6 h → 1 h error_refresh wins.
-        let next_rotation = now + chrono::Duration::hours(6);
+        let next_rotation = now + Duration::hours(6);
         let t = error_refresh_target(
-            Duration::from_hours(1),
-            Duration::ZERO,
+            Duration::hours(1),
+            Duration::zero(),
             Some(next_rotation),
             now,
         );
-        assert_eq!(t, now + chrono::Duration::hours(1));
+        assert_eq!(t, now + Duration::hours(1));
     }
 }

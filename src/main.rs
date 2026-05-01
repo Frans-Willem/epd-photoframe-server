@@ -13,7 +13,6 @@ mod weather;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
-    time::Duration,
 };
 
 use axum::{
@@ -23,7 +22,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use reqwest::Client;
 use serde::Deserialize;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -139,7 +138,9 @@ async fn main() -> anyhow::Result<()> {
 
     let state = AppState {
         screens: Arc::new(screens),
-        http: Client::builder().timeout(Duration::from_secs(30)).build()?,
+        http: Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()?,
         mqtt,
     };
 
@@ -318,7 +319,7 @@ async fn screen_handler(
             now,
         ))
     } else {
-        next_rotation.map(|n| n + chrono::Duration::from_std(cfg.wake_delay).unwrap_or_default())
+        next_rotation.map(|n| n + cfg.wake_delay)
     };
     if let Some(target) = target {
         set_refresh_header(&mut response, target, now, uri.path());
