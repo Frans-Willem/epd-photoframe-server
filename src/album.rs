@@ -23,7 +23,7 @@ struct Cache {
 #[derive(Clone)]
 pub struct AlbumClient {
     client: Client,
-    share_url: Arc<String>,
+    share_url: String,
     cache: Arc<Mutex<Option<Cache>>>,
 }
 
@@ -36,7 +36,7 @@ impl AlbumClient {
             .context("building HTTP client")?;
         Ok(Self {
             client,
-            share_url: Arc::new(share_url),
+            share_url,
             cache: Arc::new(Mutex::new(None)),
         })
     }
