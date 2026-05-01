@@ -162,10 +162,12 @@ fn resolve_index(seed: u64, cursor: i64, n: usize) -> usize {
     perm[cursor.rem_euclid(n as i64) as usize]
 }
 
-/// Seconds from `now` to `target`, rounded up, clamped at 0.
-pub fn seconds_until(target: DateTime<Utc>, now: DateTime<Utc>) -> i64 {
-    let ms = (target - now).num_milliseconds();
-    if ms <= 0 { 0 } else { (ms + 999) / 1000 }
+/// Seconds from `now` to `target`, rounded up. `target` in the past
+/// returns 0 — a `Refresh: 0` header asks the device to reload at once.
+pub fn seconds_until(target: DateTime<Utc>, now: DateTime<Utc>) -> u64 {
+    let td = target - now;
+    let secs = td.num_seconds().max(0) as u64;
+    secs.saturating_add((td.subsec_nanos() > 0) as u64)
 }
 
 /// The absolute moment at which an error response should ask the device to
