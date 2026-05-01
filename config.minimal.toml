@@ -1,0 +1,17 @@
+# Minimal config — enough to get one frame working. See config.example.toml
+# for every available option, with comments.
+
+[[screens]]
+name = "living-room"
+width = 800
+height = 480
+share_url = "https://photos.app.goo.gl/YOUR_SHARE_ID"
+
+# Reshuffle to a new random photo at 6 AM every day. Omit to keep one
+# shuffle until restart; use `rotate.cron` for full cron syntax.
+rotate.natural = "at 6 AM"
+
+# Absorbs device clock drift so a single scheduled rotation doesn't turn
+# into two wakes when the device fires slightly early. See the
+# explanation under `wake_delay` in config.example.toml.
+wake_delay = "1h"
