@@ -70,23 +70,33 @@ enum Action {
     Refresh,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum PowerState {
+pub enum PowerState {
     Battery,
     Charging,
     Full,
     Fault,
 }
 
+impl PowerState {
+    /// Every variant, in declaration order. Used by MQTT discovery to
+    /// advertise the permitted enum values.
+    pub const ALL: [Self; 4] = [Self::Battery, Self::Charging, Self::Full, Self::Fault];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Battery => "battery",
+            Self::Charging => "charging",
+            Self::Full => "full",
+            Self::Fault => "fault",
+        }
+    }
+}
+
 impl std::fmt::Display for PowerState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            PowerState::Battery => "battery",
-            PowerState::Charging => "charging",
-            PowerState::Full => "full",
-            PowerState::Fault => "fault",
-        })
+        f.write_str(self.as_str())
     }
 }
 

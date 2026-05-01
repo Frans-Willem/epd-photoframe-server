@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use rumqttc::{AsyncClient, MqttOptions, QoS};
 
+use crate::PowerState;
 use crate::config::{MqttConfig, Publish, ScreenConfig};
 
 #[derive(Clone)]
@@ -15,7 +16,7 @@ pub struct Publisher {
     state_prefix: String,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 struct Sensor {
     /// Topic suffix and discovery `object_id`.
     key: &'static str,
@@ -29,63 +30,81 @@ struct Sensor {
     unit: Option<&'static str>,
     /// Enum sensors (`device_class = "enum"`) list their permitted values
     /// here so Home Assistant can validate states and show a chooser.
-    options: Option<&'static [&'static str]>,
+    options: Option<Vec<String>>,
 }
 
-const BATTERY_PCT: Sensor = Sensor {
-    key: "battery_pct",
-    name: "Battery",
-    device_class: "battery",
-    unit: Some("%"),
-    options: None,
-};
-const BATTERY_MV: Sensor = Sensor {
-    key: "battery_mv",
-    name: "Battery voltage",
-    device_class: "voltage",
-    unit: Some("mV"),
-    options: None,
-};
-const TEMPERATURE: Sensor = Sensor {
-    key: "temperature",
-    name: "Temperature",
-    device_class: "temperature",
-    unit: Some("°C"),
-    options: None,
-};
-const HUMIDITY: Sensor = Sensor {
-    key: "humidity",
-    name: "Humidity",
-    device_class: "humidity",
-    unit: Some("%"),
-    options: None,
-};
-const POWER: Sensor = Sensor {
-    key: "power",
-    name: "Power",
-    device_class: "enum",
-    unit: None,
-    options: Some(&["battery", "charging", "full", "fault"]),
-};
-const LAST_SEEN: Sensor = Sensor {
-    key: "last_seen",
-    name: "Last seen",
-    device_class: "timestamp",
-    unit: None,
-    options: None,
-};
+impl Sensor {
+    fn battery_pct() -> Self {
+        Self {
+            key: "battery_pct",
+            name: "Battery",
+            device_class: "battery",
+            unit: Some("%"),
+            options: None,
+        }
+    }
+    fn battery_mv() -> Self {
+        Self {
+            key: "battery_mv",
+            name: "Battery voltage",
+            device_class: "voltage",
+            unit: Some("mV"),
+            options: None,
+        }
+    }
+    fn temperature() -> Self {
+        Self {
+            key: "temperature",
+            name: "Temperature",
+            device_class: "temperature",
+            unit: Some("°C"),
+            options: None,
+        }
+    }
+    fn humidity() -> Self {
+        Self {
+            key: "humidity",
+            name: "Humidity",
+            device_class: "humidity",
+            unit: Some("%"),
+            options: None,
+        }
+    }
+    fn power() -> Self {
+        Self {
+            key: "power",
+            name: "Power",
+            device_class: "enum",
+            unit: None,
+            options: Some(
+                PowerState::ALL
+                    .iter()
+                    .map(|p| p.as_str().to_string())
+                    .collect(),
+            ),
+        }
+    }
+    fn last_seen() -> Self {
+        Self {
+            key: "last_seen",
+            name: "Last seen",
+            device_class: "timestamp",
+            unit: None,
+            options: None,
+        }
+    }
+}
 
 fn enabled_sensors(cfg: &ScreenConfig) -> Vec<Sensor> {
     cfg.publish
         .iter()
         .flat_map(|p| match p {
-            Publish::Battery => &[BATTERY_PCT, BATTERY_MV][..],
-            Publish::Temperature => &[TEMPERATURE][..],
-            Publish::Humidity => &[HUMIDITY][..],
-            Publish::Power => &[POWER][..],
-            Publish::LastSeen => &[LAST_SEEN][..],
+            Publish::Battery => vec![Sensor::battery_pct(), Sensor::battery_mv()],
+            Publish::Temperature => vec![Sensor::temperature()],
+            Publish::Humidity => vec![Sensor::humidity()],
+            Publish::Power => vec![Sensor::power()],
+            Publish::LastSeen => vec![Sensor::last_seen()],
         })
-        .copied()
         .collect()
 }
 
@@ -266,18 +285,20 @@ mod tests {
 
     #[test]
     fn power_sensor_is_an_enum_with_four_options() {
-        assert_eq!(POWER.device_class, "enum");
-        assert!(POWER.unit.is_none());
+        let p = Sensor::power();
+        assert_eq!(p.device_class, "enum");
+        assert!(p.unit.is_none());
         assert_eq!(
-            POWER.options,
-            Some(&["battery", "charging", "full", "fault"][..])
+            p.options.as_deref(),
+            Some(&["battery".to_string(), "charging".to_string(), "full".to_string(), "fault".to_string()][..])
         );
     }
 
     #[test]
     fn last_seen_sensor_is_a_timestamp_with_no_unit() {
-        assert_eq!(LAST_SEEN.device_class, "timestamp");
-        assert!(LAST_SEEN.unit.is_none());
-        assert!(LAST_SEEN.options.is_none());
+        let s = Sensor::last_seen();
+        assert_eq!(s.device_class, "timestamp");
+        assert!(s.unit.is_none());
+        assert!(s.options.is_none());
     }
 }
