@@ -44,3 +44,12 @@ Open-Meteo returns daily precipitation probability and totals; show
 them somewhere in the multi-day cells (most weather apps put a `30%`
 under or beside the icon). Sanity-check legibility at the smaller
 cell sizes before committing to a position.
+
+### Localization
+Month names, full weekday names, 3-letter weekday labels, and date
+formatting are all hard-coded English in the infobox. Investigate
+whether an off-the-shelf i18n crate (e.g. `icu`, `pure-rust-locales`,
+`fluent`) handles these cleanly given a `chrono::DateTime<Tz>` and
+a locale tag, or whether bundled tables are simpler for the small set
+of strings the infobox needs. Locale would presumably be a per-screen
+config knob alongside `timezone`.

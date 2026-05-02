@@ -22,7 +22,7 @@ use tiny_skia::{FillRule, Mask, Paint, Path, PathBuilder, Pixmap, Rect, Shader, 
 use super::drawable::{self, Drawable, paint};
 use super::{Overlay, OverlayContext, ReadyOverlay};
 use crate::config::{BatteryIndicatorConfig, BatteryStyle, ColorConfig};
-use crate::draw::{asymmetric_rounded_rect_path, draw_line, line_width};
+use crate::draw::{asymmetric_rounded_rect_path, draw_line, text_width};
 
 static TEXT_FONT: LazyLock<FontRef<'static>> = LazyLock::new(|| {
     FontRef::try_from_slice(include_bytes!("../../assets/LiberationSans-Bold.ttf"))
@@ -144,7 +144,7 @@ impl Drawable for BatteryDrawable {
                 let text = format!("{}%", self.pct);
                 let s = PxScale::from(self.outer_text_px);
                 Size {
-                    width: line_width(font, s, &text),
+                    width: text_width(font, s, &text),
                     height: font.as_scaled(s).height(),
                 }
             }
@@ -317,7 +317,7 @@ fn draw_inverted_text(
     let text_px = TEXT_SIZE * layout.scale;
     let text = format!("{pct}");
     let px_scale = PxScale::from(text_px);
-    let text_w = line_width(font, px_scale, &text);
+    let text_w = text_width(font, px_scale, &text);
 
     // Centre in the 18×10 sub-canvas. Vertical baseline mirrors
     // BatteryPercentTextOnlyDrawable.kt: (canvas_h + text_size)/2 - nudge.

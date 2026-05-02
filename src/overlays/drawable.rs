@@ -22,7 +22,7 @@ use taffy::prelude::*;
 use tiny_skia::Pixmap;
 
 use crate::config::{ColorConfig, Position};
-use crate::draw::{draw_line, line_width, paint_rounded_rect};
+use crate::draw::{draw_line, paint_rounded_rect, text_width};
 
 /// Anything that can be sized and painted into a taffy node.
 ///
@@ -198,7 +198,7 @@ impl Drawable for GenericDrawable {
                 for span in spans {
                     let scale = PxScale::from(span.size);
                     let scaled = span.font.as_scaled(scale);
-                    width += line_width(span.font, scale, &span.content);
+                    width += text_width(span.font, scale, &span.content);
                     height = height.max(scaled.height());
                 }
                 Size { width, height }
@@ -231,7 +231,7 @@ impl Drawable for GenericDrawable {
                         span.color.to_tiny_skia(),
                         None,
                     );
-                    cursor += line_width(span.font, scale, &span.content);
+                    cursor += text_width(span.font, scale, &span.content);
                 }
             }
             GenericDrawable::RoundedRect { fill_color, radius } => {

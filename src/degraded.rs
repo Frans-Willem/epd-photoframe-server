@@ -9,7 +9,7 @@ use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
 use tiny_skia::{Color, Pixmap};
 
 use crate::config::{BackgroundMethod, ColorConfig};
-use crate::draw::{draw_line, line_width};
+use crate::draw::{draw_line, text_width};
 
 static TEXT_FONT: LazyLock<FontRef<'static>> = LazyLock::new(|| {
     FontRef::try_from_slice(include_bytes!("../assets/LiberationSans-Bold.ttf"))
@@ -71,7 +71,7 @@ pub fn placeholder(
     let d_ascent = d_s.ascent();
 
     for line in &heading_lines {
-        let lw = line_width(font, heading_scale, line);
+        let lw = text_width(font, heading_scale, line);
         let x = ((width as f32 - lw) / 2.0).max(0.0);
         draw_line(
             &mut pm,
@@ -89,7 +89,7 @@ pub fn placeholder(
         y += block_gap;
     }
     for line in &detail_lines {
-        let lw = line_width(font, detail_scale, line);
+        let lw = text_width(font, detail_scale, line);
         let x = ((width as f32 - lw) / 2.0).max(0.0);
         draw_line(
             &mut pm,
@@ -120,7 +120,7 @@ fn wrap<F: Font>(font: &F, scale: PxScale, text: &str, max_w: f32) -> Vec<String
             } else {
                 format!("{line} {word}")
             };
-            if line_width(font, scale, &candidate) <= max_w {
+            if text_width(font, scale, &candidate) <= max_w {
                 line = candidate;
             } else {
                 if !line.is_empty() {

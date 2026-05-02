@@ -6,7 +6,7 @@ use tiny_skia::{
 
 use crate::config::ColorConfig;
 
-pub fn line_width<F: Font>(font: &F, scale: PxScale, text: &str) -> f32 {
+pub fn text_width<F: Font>(font: &F, scale: PxScale, text: &str) -> f32 {
     let s = font.as_scaled(scale);
     let mut prev: Option<GlyphId> = None;
     let mut w = 0.0;
