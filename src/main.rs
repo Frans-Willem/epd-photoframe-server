@@ -148,7 +148,7 @@ async fn main() -> anyhow::Result<()> {
             // are present. Order here = render order (later draws on top).
             let mut overlays: Vec<Box<dyn Overlay>> = Vec::new();
             if let Some(cfg) = &s.infobox {
-                overlays.push(Box::new(Infobox::new(cfg.clone())));
+                overlays.push(Box::new(Infobox::new(cfg.clone(), s.locale.clone())));
             }
             if let Some(cfg) = &s.battery_indicator {
                 overlays.push(Box::new(BatteryIndicator::new(cfg.clone())));

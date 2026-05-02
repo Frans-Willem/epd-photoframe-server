@@ -1,6 +1,10 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Datelike};
 use chrono_tz::Tz;
+use icu::calendar::{Date, Iso};
+use icu::datetime::DateTimeFormatter;
+use icu::datetime::fieldsets::{E, YMD};
+use icu::locale::Locale;
 use taffy::prelude::*;
 use tiny_skia::Pixmap;
 
@@ -14,11 +18,12 @@ use crate::weather::{self, DailyWeather};
 /// current time from the [`OverlayContext`].
 pub struct Infobox {
     cfg: InfoboxConfig,
+    locale: Locale,
 }
 
 impl Infobox {
-    pub fn new(cfg: InfoboxConfig) -> Self {
-        Self { cfg }
+    pub fn new(cfg: InfoboxConfig, locale: Locale) -> Self {
+        Self { cfg, locale }
     }
 }
 
@@ -51,6 +56,7 @@ impl Overlay for Infobox {
         };
         Box::new(ReadyInfobox {
             cfg: self.cfg.clone(),
+            locale: self.locale.clone(),
             now: ctx.now,
             weather,
         })
@@ -59,6 +65,7 @@ impl Overlay for Infobox {
 
 struct ReadyInfobox {
     cfg: InfoboxConfig,
+    locale: Locale,
     now: DateTime<Tz>,
     /// One entry per day starting from "today" (index 0). Empty when
     /// the configured layout doesn't request weather, or when the
@@ -103,9 +110,20 @@ impl ReadyOverlay for ReadyInfobox {
         )
         .expect("attach background context");
 
+        // Locale-driven date / weekday formatters. The header uses the long
+        // forms; the multi-day cell row below uses the short form (which CLDR
+        // sizes per locale — `Sat`/`Sa`/`sam.`/`土` rather than a fixed 3 chars).
+        let weekday_full = DateTimeFormatter::try_new(self.locale.clone().into(), E::long())
+            .expect("locale supports long weekday names");
+        let weekday_short = DateTimeFormatter::try_new(self.locale.clone().into(), E::short())
+            .expect("locale supports short weekday names");
+        let date_long = DateTimeFormatter::try_new(self.locale.clone().into(), YMD::long())
+            .expect("locale supports long dates");
+        let now_iso = icu_date(&self.now);
+
         // Header: zero, one, or two text lines.
         if matches!(cfg.header_layout, HeaderLayout::Day | HeaderLayout::DayDate) {
-            let day_text = self.now.format("%A").to_string();
+            let day_text = weekday_full.format(&now_iso).to_string();
             let n = text_leaf(&mut tree, day_text, text_px, fg);
             tree.add_child(infobox, n).expect("attach day line");
         }
@@ -113,12 +131,7 @@ impl ReadyOverlay for ReadyInfobox {
             cfg.header_layout,
             HeaderLayout::Date | HeaderLayout::DayDate
         ) {
-            let date_text = format!(
-                "{} {} {}",
-                self.now.day(),
-                MONTHS[self.now.month0() as usize],
-                self.now.year()
-            );
+            let date_text = date_long.format(&now_iso).to_string();
             let n = text_leaf(&mut tree, date_text, text_px, fg);
             tree.add_child(infobox, n).expect("attach date line");
         }
@@ -164,6 +177,7 @@ impl ReadyOverlay for ReadyInfobox {
                 (0..4).map(|i| self.weather.get(i + 1)),
                 fg,
                 cfg.units,
+                &weekday_short,
             );
             tree.add_child(infobox, row).expect("attach 4-cell row");
         }
@@ -176,6 +190,7 @@ impl ReadyOverlay for ReadyInfobox {
                 (0..5).map(|i| self.weather.get(i)),
                 fg,
                 cfg.units,
+                &weekday_short,
             );
             tree.add_child(infobox, row).expect("attach 5-cell row");
         }
@@ -333,13 +348,14 @@ fn compact_cell_row<'a>(
     weather: impl Iterator<Item = Option<&'a DailyWeather>>,
     color: crate::config::ColorConfig,
     units: Units,
+    weekday_fmt: &DateTimeFormatter<E>,
 ) -> NodeId {
     let placeholder_temp = format!("—{}", units.temperature_suffix());
     let cells: Vec<NodeId> = weather
         .enumerate()
         .map(|(i, w)| {
             let date = first_date + chrono::Duration::days(i as i64);
-            let weekday = date.format("%a").to_string();
+            let weekday = weekday_fmt.format(&icu_date(&date)).to_string();
             let fmt_temp = |t: f32| format!("{:.0}{}", t.round(), units.temperature_suffix());
             let max_temp =
                 w.map_or_else(|| placeholder_temp.clone(), |w| fmt_temp(w.temperature_max));
@@ -378,20 +394,12 @@ fn compact_cell_row<'a>(
     .expect("create cell row")
 }
 
-const MONTHS: [&str; 12] = [
-    "January",
-    "February",
-    "March",
-    "April",
-    "May",
-    "June",
-    "July",
-    "August",
-    "September",
-    "October",
-    "November",
-    "December",
-];
+/// Bridge a chrono date in any timezone to icu4x's calendar type. icu4x
+/// formatters operate on `Date<Iso>`; we only need the calendar date
+/// (year/month/day) since the infobox doesn't display time-of-day.
+fn icu_date(d: &DateTime<Tz>) -> Date<Iso> {
+    Date::try_new_iso(d.year(), d.month() as u8, d.day() as u8).expect("chrono date in icu range")
+}
 
 /// Maps an Open-Meteo (WMO 4677) weather code to a Weather Icons glyph.
 /// Neutral (non-day/night) icons, since the infobox summarises the whole day.
@@ -461,6 +469,7 @@ mod tests {
                 weather_layout,
                 ..cfg()
             },
+            locale: "en-GB".parse().unwrap(),
             now: UTC.with_ymd_and_hms(2026, 4, 20, 12, 0, 0).unwrap(),
             weather,
         }

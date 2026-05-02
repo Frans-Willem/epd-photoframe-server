@@ -1,5 +1,6 @@
 use chrono::Duration;
 use chrono_tz::Tz;
+use icu::locale::Locale;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -116,6 +117,12 @@ pub struct ScreenConfig {
         deserialize_with = "deserialize_timezone"
     )]
     pub timezone: Tz,
+    /// BCP-47 locale tag (e.g. `nl-NL`, `fr-FR`, `de-DE`, `en-US`) controlling
+    /// the language and date format of the infobox header and the per-day
+    /// weekday cells. Defaults to `en-GB` — full English names with
+    /// day-month-year ordering (e.g. `Saturday`, `2 May 2026`, `Sat`).
+    #[serde(default = "default_locale", deserialize_with = "deserialize_locale")]
+    pub locale: Locale,
     #[serde(default)]
     pub dither: DitherConfig,
     /// Sensors to forward to MQTT for this screen. Each entry maps to one or
@@ -182,6 +189,19 @@ where
     let name = String::deserialize(d)?;
     name.parse::<Tz>()
         .map_err(|e| serde::de::Error::custom(format!("invalid IANA timezone `{name}`: {e}")))
+}
+
+fn default_locale() -> Locale {
+    "en-GB".parse().expect("en-GB is a valid BCP-47 locale tag")
+}
+
+fn deserialize_locale<'de, D>(d: D) -> Result<Locale, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let name = String::deserialize(d)?;
+    Locale::from_str(&name)
+        .map_err(|e| serde::de::Error::custom(format!("invalid locale `{name}`: {e}")))
 }
 
 impl Config {
