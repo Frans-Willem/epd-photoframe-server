@@ -1,14 +1,15 @@
 mod album;
 mod background;
-mod battery_indicator;
 mod config;
 mod degraded;
 mod dither;
-mod infobox;
+mod draw;
 mod mqtt;
-mod overlay;
+mod overlays;
 mod palette_image;
 mod screen_state;
+#[cfg(test)]
+mod test_snapshot;
 mod weather;
 
 use std::{
@@ -33,6 +34,7 @@ use album::AlbumClient;
 use config::{Config, Publish, ScreenConfig};
 use dither::PreparedDitherMethod;
 use mqtt::Publisher;
+use overlays::{BatteryIndicator, Infobox, Overlay, OverlayContext, SensorState};
 use screen_state::{ScreenState, error_refresh_target, seconds_until};
 
 struct Screen {
@@ -40,6 +42,9 @@ struct Screen {
     album: AlbumClient,
     state: Mutex<ScreenState>,
     dither_method: PreparedDitherMethod,
+    /// Per-screen overlay list, built once at startup. Render order =
+    /// list order (later overlays draw on top of earlier ones).
+    overlays: Vec<Box<dyn Overlay>>,
 }
 
 #[derive(Clone)]
@@ -133,10 +138,20 @@ async fn main() -> anyhow::Result<()> {
             let state = Mutex::new(ScreenState::new(&s));
             let dither_method = PreparedDitherMethod::prepare(&s.dither)
                 .with_context(|| format!("preparing dither for screen `{}`", s.name))?;
+            // Build the overlay list from whichever named config sections
+            // are present. Order here = render order (later draws on top).
+            let mut overlays: Vec<Box<dyn Overlay>> = Vec::new();
+            if let Some(cfg) = &s.infobox {
+                overlays.push(Box::new(Infobox::new(cfg.clone())));
+            }
+            if let Some(cfg) = &s.battery_indicator {
+                overlays.push(Box::new(BatteryIndicator::new(cfg.clone())));
+            }
             let screen = Screen {
                 album,
                 state,
                 dither_method,
+                overlays,
                 config: s,
             };
             Ok::<_, anyhow::Error>((screen.config.name.clone(), screen))
@@ -185,8 +200,26 @@ async fn screen_handler(
     let mut degraded = false;
     let mut next_rotation: Option<DateTime<Utc>> = None;
 
-    // Photo and weather are independent network round-trips — fire concurrently.
-    let (image_result, weather_result) = tokio::join!(
+    // Snapshot device-reported sensor data once; overlays read from this.
+    let sensors = SensorState {
+        battery_mv: q.battery_mv,
+        battery_pct: q.battery_pct,
+        temperature_c: q.temperature_c,
+        humidity_pct: q.humidity_pct,
+        power: q.power,
+    };
+    let ctx = OverlayContext {
+        now: now.with_timezone(&screen.config.timezone),
+        sensors: &sensors,
+        http: &state.http,
+        canvas_size: (cfg.width, cfg.height),
+    };
+
+    // Photo retrieval and overlay preprocesses are independent — fire all
+    // concurrently. Each overlay's preprocess does its own external work
+    // (e.g. weather fetch); soft failures surface via `ReadyOverlay::degraded`
+    // rather than aborting the request.
+    let (image_result, ready_overlays) = tokio::join!(
         async {
             let img = screen
                 .album
@@ -205,20 +238,7 @@ async fn screen_handler(
                 .await?;
             background::apply(img, cfg.width, cfg.height, &cfg.background)
         },
-        async {
-            match cfg.infobox.as_ref() {
-                Some(ibox) => weather::daily(
-                    &state.http,
-                    ibox.latitude,
-                    ibox.longitude,
-                    screen.config.timezone.name(),
-                    ibox.units,
-                )
-                .await
-                .map(Some),
-                None => Ok(None),
-            }
-        },
+        futures::future::join_all(screen.overlays.iter().map(|o| o.preprocess(&ctx))),
     );
 
     let mut img = match image_result {
@@ -243,21 +263,11 @@ async fn screen_handler(
         }
     };
 
-    let weather = match weather_result {
-        Ok(w) => w,
-        Err(e) => {
-            tracing::warn!(screen = %name, error = %format!("{e:#}"), "weather fetch failed; infobox will show error");
+    for overlay in &ready_overlays {
+        if overlay.degraded() {
             degraded = true;
-            None
         }
-    };
-
-    if let Some(infobox_cfg) = &cfg.infobox {
-        infobox::apply(&mut img, infobox_cfg, &screen.config.timezone, weather);
-    }
-
-    if let (Some(indicator_cfg), Some(pct)) = (&cfg.battery_indicator, q.battery_pct) {
-        battery_indicator::apply(&mut img, indicator_cfg, pct);
+        overlay.render(&mut img);
     }
 
     if let Some(publisher) = &state.mqtt {

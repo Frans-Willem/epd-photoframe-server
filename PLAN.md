@@ -414,7 +414,7 @@ output is pixel-identical to the current code for the default config.
 
 # Sequencing
 
-Total: 11 commits across 4 stages, each step independently shippable.
+Total: 10 commits across 4 stages, each step independently shippable.
 Each step ends with the build green and existing tests passing.
 Behaviour changes are explicit in the step description; pure refactors
 are called out.
@@ -451,36 +451,30 @@ arrival.)
 near-identical with documented rounding tolerances) to before this
 commit. `cargo test` clean.
 
-## Stage 2 — Overlay abstraction (2 commits)
+## Stage 2 — Overlay abstraction (1 commit)
 
-### Step 2 — Overlay trait definitions
+### Step 2 — Overlay traits + convert existing overlays + parallel preprocess
 
-**Files:** new module (e.g. `src/overlays/traits.rs`), `Cargo.toml`
-(add `async_trait`).
+**Files:** new module (e.g. `src/overlays/{mod,traits}.rs`),
+`Cargo.toml` (add `async-trait`), `src/battery_indicator.rs`,
+`src/infobox.rs`, `src/main.rs`, `src/weather.rs`.
 
-**Changes:**
-- Define `Overlay`, `ReadyOverlay`, `OverlayContext` per the trait
-  sketch in Phase 1.
-- `ReadyOverlay::render` takes `&mut tiny_skia::Pixmap`.
-- Pick async-trait approach: `async_trait` macro vs native
-  async-fn-in-trait + `Pin<Box<...>>`. Recommend `async_trait` for
-  readability; deferred to Phase 1 open questions otherwise.
-- No callers yet — pure addition.
-
-**Acceptance:** `cargo build` and `cargo test` clean. No behaviour
-change.
-
-### Step 3 — Convert overlays to `Overlay` impls + parallel preprocess
-
-**Files:** `src/battery_indicator.rs`, `src/infobox.rs`, `src/main.rs`,
-`src/weather.rs`.
+Trait definition and first implementations land together — splitting
+them produces a scaffold commit with dead-code warnings, and you
+don't actually know if the trait shape is right until something
+implements it.
 
 **Changes:**
+- Define `Overlay`, `ReadyOverlay`, `OverlayContext`, and
+  `SensorState` per the trait sketch in Phase 1. `ReadyOverlay::render`
+  takes `&mut tiny_skia::Pixmap`. Async-trait approach: `async_trait`
+  macro for readability (vs native async-fn-in-trait + manual
+  `Pin<Box<...>>` boilerplate for trait objects).
 - `BatteryIndicator` and `Infobox` implement `Overlay`. Existing
   `apply()` bodies move into `ReadyOverlay::render`.
 - Each overlay struct captures its screen-derived config (timezone,
   position, lat/lon, thresholds) at construction.
-- Weather fetch moves from inside `Infobox::render` to
+- Weather fetch moves from inside the request handler to
   `Infobox::preprocess`. Failed fetch yields a `ReadyOverlay` that
   renders the existing "Weather error" message (preserves current
   behaviour).
@@ -500,7 +494,7 @@ overlapped with photo retrieval.
 
 ## Stage 3 — Taffy migration (2 commits)
 
-### Step 4 — taffy + `Drawable` scaffolding
+### Step 3 — taffy + `Drawable` scaffolding
 
 **Files:** new module (e.g. `src/overlays/draw.rs`), `Cargo.toml`
 (add `taffy`).
@@ -520,7 +514,7 @@ overlapped with photo retrieval.
 build a tiny tree, compute layout, and verify the walker visits in
 the right order with correct accumulated coordinates.
 
-### Step 5 — Refactor `Infobox::render` onto taffy + `Drawable` (pure refactor)
+### Step 4 — Refactor `Infobox::render` onto taffy + `Drawable` (pure refactor)
 
 **Files:** `src/infobox.rs`.
 
@@ -540,7 +534,7 @@ new snapshot test passes).
 
 ## Stage 4 — Multi-day layouts (6 commits)
 
-### Step 6 — Add `HeaderLayout` + `WeatherLayout` config (no behaviour change)
+### Step 5 — Add `HeaderLayout` + `WeatherLayout` config (no behaviour change)
 
 **Files:** `src/config.rs`, `src/infobox.rs` (constructor only).
 
@@ -556,7 +550,7 @@ new snapshot test passes).
 `header_layout = "day-date"` / `weather_layout = "one"` both render
 identically to before.
 
-### Step 7 — Wire layout fields for all single-day combinations
+### Step 6 — Wire layout fields for all single-day combinations
 
 **Files:** `src/infobox.rs`.
 
@@ -573,7 +567,7 @@ identically to before.
 Header-only and weather-only render correctly; `none + none` is a
 no-op overlay.
 
-### Step 8 — Generalise weather fetch + add `compact_cell` tree-builder
+### Step 7 — Generalise weather fetch + add `compact_cell` tree-builder
 
 **Files:** `src/weather.rs`, `src/infobox.rs` (or new helper module).
 
@@ -592,7 +586,7 @@ no-op overlay.
 **Acceptance:** Existing single-day infobox behaviour unchanged
 (snapshot test still passes); helper test passes.
 
-### Step 9 — Implement `weather_layout = one-plus-four`
+### Step 8 — Implement `weather_layout = one-plus-four`
 
 **Files:** `src/infobox.rs`.
 
@@ -604,7 +598,7 @@ no-op overlay.
 **Acceptance:** New layout renders; tests pass; manual visual check
 on E1004 matches the mockup.
 
-### Step 10 — Implement `weather_layout = five`
+### Step 9 — Implement `weather_layout = five`
 
 **Files:** `src/infobox.rs`.
 
@@ -616,7 +610,7 @@ on E1004 matches the mockup.
 **Acceptance:** New layout renders; tests pass; manual visual check
 on E1004 matches the mockup.
 
-### Step 11 — Documentation
+### Step 10 — Documentation
 
 **Files:** `README.md`, `config.example.toml`.
 

@@ -9,7 +9,7 @@ use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
 use tiny_skia::{Color, Pixmap};
 
 use crate::config::{BackgroundMethod, ColorConfig};
-use crate::overlay::{draw_line, line_width};
+use crate::draw::{draw_line, line_width};
 
 static TEXT_FONT: LazyLock<FontRef<'static>> = LazyLock::new(|| {
     FontRef::try_from_slice(include_bytes!("../assets/LiberationSans-Bold.ttf"))
