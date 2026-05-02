@@ -16,11 +16,13 @@ use std::sync::LazyLock;
 
 use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
 use async_trait::async_trait;
+use taffy::prelude::*;
 use tiny_skia::{FillRule, Mask, Paint, Path, PathBuilder, Pixmap, Rect, Shader, Transform};
 
+use super::drawable::{Drawable, paint, position_to_flex};
 use super::{Overlay, OverlayContext, ReadyOverlay};
 use crate::config::{BatteryIndicatorConfig, BatteryStyle, ColorConfig};
-use crate::draw::{asymmetric_rounded_rect_path, draw_line, line_width, place};
+use crate::draw::{asymmetric_rounded_rect_path, draw_line, line_width};
 
 static TEXT_FONT: LazyLock<FontRef<'static>> = LazyLock::new(|| {
     FontRef::try_from_slice(include_bytes!("../../assets/LiberationSans-Bold.ttf"))
@@ -106,29 +108,79 @@ impl ReadyOverlay for ReadyBatteryIndicator {
             }
         };
 
-        let (px, py) = place(
-            canvas.width(),
-            canvas.height(),
-            content_w.ceil() as u32,
-            content_h.ceil() as u32,
-            cfg.position,
-            edge,
-        );
+        // Same shape as the infobox: a viewport flex sized to the canvas
+        // with the indicator as a single sized leaf, anchored via
+        // `position_to_flex`. The leaf carries a `BatteryNode` context
+        // that knows how to paint the silhouette, level fill, and text.
+        let mut tree: TaffyTree<BatteryNode> = TaffyTree::new();
+        let icon = tree
+            .new_leaf_with_context(
+                Style {
+                    size: Size {
+                        width: length(content_w),
+                        height: length(content_h),
+                    },
+                    ..Default::default()
+                },
+                BatteryNode {
+                    cfg: cfg.clone(),
+                    pct,
+                    scale,
+                    outer_text_px,
+                },
+            )
+            .expect("create battery leaf");
+        let (justify, align) = position_to_flex(cfg.position);
+        let viewport = tree
+            .new_with_children(
+                Style {
+                    display: Display::Flex,
+                    flex_direction: FlexDirection::Row,
+                    size: Size {
+                        width: length(canvas.width() as f32),
+                        height: length(canvas.height() as f32),
+                    },
+                    padding: taffy::Rect::length(edge as f32),
+                    justify_content: Some(justify),
+                    align_items: Some(align),
+                    ..Default::default()
+                },
+                &[icon],
+            )
+            .expect("create viewport");
 
+        paint(&mut tree, viewport, canvas);
+    }
+}
+
+/// The battery-specific drawable: knows how to paint the silhouette,
+/// level fill, and (optional) percentage text at a given top-left
+/// position in viewport units scaled by `scale`. The leaf carrying
+/// this context declares its size via taffy `Style.size`, so the
+/// default `measure() -> ZERO` is fine.
+struct BatteryNode {
+    cfg: BatteryIndicatorConfig,
+    pct: u8,
+    scale: f32,
+    outer_text_px: f32,
+}
+
+impl Drawable for BatteryNode {
+    fn draw(&self, canvas: &mut Pixmap, x: f32, y: f32, _w: f32, _h: f32) {
+        let font: &FontRef<'static> = &TEXT_FONT;
         let layout = Layout {
-            ox: px as f32,
-            oy: py as f32,
-            scale,
+            ox: x,
+            oy: y,
+            scale: self.scale,
         };
-        let fg = effective_fg(cfg, pct);
-
-        match cfg.style {
+        let fg = effective_fg(&self.cfg, self.pct);
+        match self.cfg.style {
             BatteryStyle::Icon => {
-                draw_silhouette(canvas, &layout, pct, fg, cfg.empty_color);
+                draw_silhouette(canvas, &layout, self.pct, fg, self.cfg.empty_color);
             }
             BatteryStyle::Text => {
-                let text = format!("{pct}%");
-                let s = PxScale::from(outer_text_px);
+                let text = format!("{}%", self.pct);
+                let s = PxScale::from(self.outer_text_px);
                 let baseline = layout.oy + font.as_scaled(s).ascent();
                 draw_line(
                     canvas,
@@ -142,8 +194,8 @@ impl ReadyOverlay for ReadyBatteryIndicator {
                 );
             }
             BatteryStyle::Both => {
-                draw_silhouette(canvas, &layout, pct, fg, cfg.empty_color);
-                draw_inverted_text(canvas, font, &layout, pct, fg, cfg.empty_color);
+                draw_silhouette(canvas, &layout, self.pct, fg, self.cfg.empty_color);
+                draw_inverted_text(canvas, font, &layout, self.pct, fg, self.cfg.empty_color);
             }
         }
     }

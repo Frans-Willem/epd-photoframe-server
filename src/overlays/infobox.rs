@@ -4,9 +4,9 @@ use chrono_tz::Tz;
 use taffy::prelude::*;
 use tiny_skia::Pixmap;
 
-use super::drawable::{Drawable, walk};
+use super::drawable::{GenericDrawable, TextSpan, paint, position_to_flex};
 use super::{Overlay, OverlayContext, ReadyOverlay};
-use crate::config::{HeaderLayout, InfoboxConfig, Position, Units, WeatherLayout};
+use crate::config::{HeaderLayout, InfoboxConfig, Units, WeatherLayout};
 use crate::weather::{self, DailyWeather};
 
 impl Units {
@@ -28,24 +28,6 @@ pub struct Infobox {
 impl Infobox {
     pub fn new(cfg: InfoboxConfig) -> Self {
         Self { cfg }
-    }
-}
-
-/// Map a `Position` (one of the 8 corners + edges) to the flex
-/// `justify_content` (horizontal) / `align_items` (vertical) pair
-/// that anchors a single child in that position inside a viewport-
-/// sized container.
-fn position_to_flex(p: Position) -> (JustifyContent, AlignItems) {
-    use Position::*;
-    match p {
-        TopLeft => (JustifyContent::Start, AlignItems::Start),
-        Top => (JustifyContent::Center, AlignItems::Start),
-        TopRight => (JustifyContent::End, AlignItems::Start),
-        Left => (JustifyContent::Start, AlignItems::Center),
-        Right => (JustifyContent::End, AlignItems::Center),
-        BottomLeft => (JustifyContent::Start, AlignItems::End),
-        Bottom => (JustifyContent::Center, AlignItems::End),
-        BottomRight => (JustifyContent::End, AlignItems::End),
     }
 }
 
@@ -117,7 +99,7 @@ impl ReadyOverlay for ReadyInfobox {
         let radius = text_px * 0.6;
         let fg = cfg.foreground;
 
-        let mut tree: TaffyTree<Drawable> = TaffyTree::new();
+        let mut tree: TaffyTree<GenericDrawable> = TaffyTree::new();
         let mut children: Vec<NodeId> = Vec::new();
 
         // Header: zero, one, or two text lines.
@@ -140,7 +122,7 @@ impl ReadyOverlay for ReadyInfobox {
 
         // Weather panel. Today's icon+range line — used by `One` directly,
         // and as the top of the `OnePlusFour` block.
-        let today_line = |tree: &mut TaffyTree<Drawable>| {
+        let today_line = |tree: &mut TaffyTree<GenericDrawable>| {
             // On weather-fetch failure, keep the line shape (icon + text) but
             // show a short status string instead of the temperature range.
             // The full error goes to the server-side log.
@@ -158,14 +140,10 @@ impl ReadyOverlay for ReadyInfobox {
             };
             tree.new_leaf_with_context(
                 Style::default(),
-                Drawable::IconText {
-                    icon: icon_glyph,
-                    icon_size: icon_px,
-                    gap: icon_gap,
-                    text: weather_text,
-                    text_size: text_px,
-                    color: fg,
-                },
+                GenericDrawable::MultiText(vec![
+                    TextSpan::icon(icon_glyph, icon_px, fg),
+                    TextSpan::text(weather_text, text_px, fg).with_gap_before(icon_gap),
+                ]),
             )
             .expect("create weather leaf")
         };
@@ -224,8 +202,8 @@ impl ReadyOverlay for ReadyInfobox {
             .expect("create infobox");
         tree.set_node_context(
             infobox,
-            Some(Drawable::Background {
-                color: cfg.background,
+            Some(GenericDrawable::RoundedRect {
+                fill_color: cfg.background,
                 radius,
             }),
         )
@@ -255,22 +233,7 @@ impl ReadyOverlay for ReadyInfobox {
             )
             .expect("create viewport");
 
-        tree.compute_layout_with_measure(
-            viewport,
-            Size {
-                width: AvailableSpace::Definite(canvas.width() as f32),
-                height: AvailableSpace::Definite(canvas.height() as f32),
-            },
-            |_known, _avail, _id, ctx, _style| {
-                ctx.map(|d: &mut Drawable| d.measure())
-                    .unwrap_or(Size::ZERO)
-            },
-        )
-        .expect("compute layout");
-
-        walk(&tree, viewport, 0.0, 0.0, &mut |x, y, w, h, d| {
-            d.draw(canvas, x, y, w, h);
-        });
+        paint(&mut tree, viewport, canvas);
     }
 
     fn degraded(&self) -> bool {
@@ -283,18 +246,14 @@ impl ReadyOverlay for ReadyInfobox {
 }
 
 fn text_leaf(
-    tree: &mut TaffyTree<Drawable>,
+    tree: &mut TaffyTree<GenericDrawable>,
     content: String,
     size: f32,
     color: crate::config::ColorConfig,
 ) -> NodeId {
     tree.new_leaf_with_context(
         Style::default(),
-        Drawable::Text {
-            content,
-            size,
-            color,
-        },
+        GenericDrawable::MultiText(vec![TextSpan::text(content, size, color)]),
     )
     .expect("create text leaf")
 }
@@ -356,7 +315,7 @@ impl CellStyle {
 /// weather icon, max temperature, min temperature. Sizes come from
 /// `style` so the same builder serves both multi-day layouts.
 fn compact_cell(
-    tree: &mut TaffyTree<Drawable>,
+    tree: &mut TaffyTree<GenericDrawable>,
     style: &CellStyle,
     weekday: String,
     icon_glyph: char,
@@ -368,11 +327,7 @@ fn compact_cell(
     let icon_node = tree
         .new_leaf_with_context(
             Style::default(),
-            Drawable::Icon {
-                glyph: icon_glyph,
-                size: style.icon_size,
-                color,
-            },
+            GenericDrawable::MultiText(vec![TextSpan::icon(icon_glyph, style.icon_size, color)]),
         )
         .expect("create icon leaf");
     let max_node = text_leaf(tree, max_temp, style.temp_size, color);
@@ -420,7 +375,7 @@ fn compact_cell(
 /// so the row's structure stays consistent regardless of fetch outcome
 /// (and tolerates Open-Meteo returning fewer or more days than asked).
 fn compact_cell_row<'a>(
-    tree: &mut TaffyTree<Drawable>,
+    tree: &mut TaffyTree<GenericDrawable>,
     style: &CellStyle,
     first_date: DateTime<Tz>,
     weather: impl Iterator<Item = Option<&'a DailyWeather>>,

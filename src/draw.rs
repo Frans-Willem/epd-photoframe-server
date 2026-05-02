@@ -4,7 +4,7 @@ use tiny_skia::{
     Transform,
 };
 
-use crate::config::{ColorConfig, Position};
+use crate::config::ColorConfig;
 
 pub fn line_width<F: Font>(font: &F, scale: PxScale, text: &str) -> f32 {
     let s = font.as_scaled(scale);
@@ -149,37 +149,4 @@ pub fn asymmetric_rounded_rect_path(
     pb.cubic_to(x, y + lr - lcp, x + lr - lcp, y, x + lr, y);
     pb.close();
     pb.finish()
-}
-
-pub fn place(
-    scr_w: u32,
-    scr_h: u32,
-    box_w: u32,
-    box_h: u32,
-    pos: Position,
-    edge: u32,
-) -> (i32, i32) {
-    let (sw, sh, bw, bh, e) = (
-        scr_w as i32,
-        scr_h as i32,
-        box_w as i32,
-        box_h as i32,
-        edge as i32,
-    );
-    let left = e;
-    let right = (sw - bw - e).max(0);
-    let top = e;
-    let bottom = (sh - bh - e).max(0);
-    let hcenter = ((sw - bw) / 2).max(0);
-    let vcenter = ((sh - bh) / 2).max(0);
-    match pos {
-        Position::TopLeft => (left, top),
-        Position::Top => (hcenter, top),
-        Position::TopRight => (right, top),
-        Position::Left => (left, vcenter),
-        Position::Right => (right, vcenter),
-        Position::BottomLeft => (left, bottom),
-        Position::Bottom => (hcenter, bottom),
-        Position::BottomRight => (right, bottom),
-    }
 }
