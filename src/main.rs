@@ -6,7 +6,6 @@ mod dither;
 mod draw;
 mod mqtt;
 mod overlays;
-mod palette_image;
 mod screen_state;
 #[cfg(test)]
 mod test_snapshot;
@@ -301,7 +300,11 @@ async fn screen_handler(
 
     let png = match tokio::task::spawn_blocking({
         let dither_method = screen.dither_method.clone();
-        move || dither_method.run(img).and_then(|p| p.to_png())
+        move || {
+            dither_method
+                .run(img)
+                .and_then(|p| p.to_png().map_err(anyhow::Error::from))
+        }
     })
     .await
     {

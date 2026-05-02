@@ -456,13 +456,14 @@ checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 [[package]]
 name = "epd-dither"
 version = "0.1.0"
-source = "git+https://github.com/Frans-Willem/epd-dither?rev=ff14c849f3f4639fdf76e03aab5dbbd8a3e623ad#ff14c849f3f4639fdf76e03aab5dbbd8a3e623ad"
+source = "git+https://github.com/Frans-Willem/epd-dither?rev=8af6083657f35a60f340282118fee907a172fe7c#8af6083657f35a60f340282118fee907a172fe7c"
 dependencies = [
  "image",
  "itertools",
  "nalgebra",
  "num-traits",
  "png",
+ "rand 0.9.2",
  "tinyvec",
 ]
 
