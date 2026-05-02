@@ -226,7 +226,20 @@ async fn screen_handler(
         Err(e) => {
             tracing::warn!(screen = %name, error = %format!("{e:#}"), "image fetch failed; rendering placeholder");
             degraded = true;
-            degraded::placeholder(cfg.width, cfg.height, &cfg.background, &format!("{e:#}"))
+            match degraded::placeholder(cfg.width, cfg.height, &cfg.background, &format!("{e:#}")) {
+                Ok(pm) => pm,
+                Err(pe) => {
+                    tracing::error!(screen = %name, error = %format!("{pe:#}"), "placeholder allocation failed");
+                    return error_response_with_refresh(
+                        format!("placeholder failed: {pe:#}"),
+                        cfg.error_refresh,
+                        cfg.wake_delay,
+                        next_rotation,
+                        now,
+                        uri.path(),
+                    );
+                }
+            }
         }
     };
 

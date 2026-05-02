@@ -6,11 +6,10 @@
 use std::sync::LazyLock;
 
 use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
-use image::{Rgb, RgbImage};
-use tiny_skia::Color;
+use tiny_skia::{Color, Pixmap};
 
 use crate::config::{BackgroundMethod, ColorConfig};
-use crate::overlay::{draw_line, line_width, pixmap_to_rgb, rgb_to_pixmap};
+use crate::overlay::{draw_line, line_width};
 
 static TEXT_FONT: LazyLock<FontRef<'static>> = LazyLock::new(|| {
     FontRef::try_from_slice(include_bytes!("../assets/LiberationSans-Bold.ttf"))
@@ -19,12 +18,14 @@ static TEXT_FONT: LazyLock<FontRef<'static>> = LazyLock::new(|| {
 
 const HEADING: &str = "Failed to fetch image";
 
+/// Build a screen-sized Pixmap with diagnostic text. Errors only on
+/// allocation failure (degenerate dimensions).
 pub fn placeholder(
     width: u32,
     height: u32,
     background: &BackgroundMethod,
     detail: &str,
-) -> RgbImage {
+) -> anyhow::Result<Pixmap> {
     // Blur has no photo to blur — fall back to white so there's a definite
     // canvas colour to invert the text against.
     let bg = match background {
@@ -32,10 +33,12 @@ pub fn placeholder(
         BackgroundMethod::Blur => ColorConfig::rgb(255, 255, 255),
     };
     let bg_rgb = bg.to_rgb();
-    let fg_rgb = Rgb([255 - bg_rgb[0], 255 - bg_rgb[1], 255 - bg_rgb[2]]);
+    let fg_rgb = [255 - bg_rgb[0], 255 - bg_rgb[1], 255 - bg_rgb[2]];
     let fg_color = Color::from_rgba8(fg_rgb[0], fg_rgb[1], fg_rgb[2], 255);
 
-    let mut img = RgbImage::from_pixel(width, height, bg_rgb);
+    let mut pm = Pixmap::new(width, height)
+        .ok_or_else(|| anyhow::anyhow!("failed to allocate {width}x{height} pixmap"))?;
+    pm.fill(Color::from_rgba8(bg_rgb[0], bg_rgb[1], bg_rgb[2], 255));
 
     let scr_min = width.min(height) as f32;
     let heading_px = (scr_min * 0.06).max(18.0);
@@ -62,10 +65,6 @@ pub fn placeholder(
             block_gap
         })
         + detail_lines.len() as f32 * d_lh;
-
-    let Some(mut pm) = rgb_to_pixmap(&img) else {
-        return img;
-    };
 
     let mut y = ((height as f32 - total_h) / 2.0).max(0.0);
     let h_ascent = h_s.ascent();
@@ -105,8 +104,7 @@ pub fn placeholder(
         y += d_lh;
     }
 
-    pixmap_to_rgb(&pm, &mut img);
-    img
+    Ok(pm)
 }
 
 /// Greedy word-wrap to fit `max_w` (in pixels at the given scale). Words that
@@ -142,37 +140,44 @@ fn wrap<F: Font>(font: &F, scale: PxScale, text: &str, max_w: f32) -> Vec<String
 mod tests {
     use super::*;
 
+    fn pixel_at(pm: &Pixmap, x: u32, y: u32) -> (u8, u8, u8) {
+        let p = pm.pixel(x, y).expect("in-bounds");
+        (p.red(), p.green(), p.blue())
+    }
+
     #[test]
     fn placeholder_is_correct_size() {
-        let img = placeholder(
+        let pm = placeholder(
             800,
             480,
             &BackgroundMethod::Solid(ColorConfig::rgb(255, 255, 255)),
             "boom",
-        );
-        assert_eq!((img.width(), img.height()), (800, 480));
+        )
+        .unwrap();
+        assert_eq!((pm.width(), pm.height()), (800, 480));
     }
 
     #[test]
     fn placeholder_fills_background_and_renders_text() {
-        let img = placeholder(
+        let pm = placeholder(
             800,
             480,
             &BackgroundMethod::Solid(ColorConfig::rgb(255, 255, 255)),
             "boom",
-        );
+        )
+        .unwrap();
         // A corner pixel — well outside the centred text — should be the
         // background colour.
-        assert_eq!(img.get_pixel(0, 0), &Rgb([255, 255, 255]));
+        assert_eq!(pixel_at(&pm, 0, 0), (255, 255, 255));
         // Some pixel near the centre should be non-background (text drawn).
         let mut any_changed = false;
-        let cx = img.width() / 2;
-        let cy = img.height() / 2;
+        let cx = pm.width() / 2;
+        let cy = pm.height() / 2;
         for dx in -50i32..=50 {
             for dy in -50i32..=50 {
                 let x = (cx as i32 + dx) as u32;
                 let y = (cy as i32 + dy) as u32;
-                if img.get_pixel(x, y) != &Rgb([255, 255, 255]) {
+                if pixel_at(&pm, x, y) != (255, 255, 255) {
                     any_changed = true;
                 }
             }
@@ -182,29 +187,29 @@ mod tests {
 
     #[test]
     fn blur_background_falls_back_to_white() {
-        let img = placeholder(400, 300, &BackgroundMethod::Blur, "x");
-        assert_eq!(img.get_pixel(0, 0), &Rgb([255, 255, 255]));
+        let pm = placeholder(400, 300, &BackgroundMethod::Blur, "x").unwrap();
+        assert_eq!(pixel_at(&pm, 0, 0), (255, 255, 255));
     }
 
     #[test]
     fn text_inverts_background() {
         // Black background → white text. Find the brightest pixel near the
         // centre and confirm it's much closer to white than to black.
-        let img = placeholder(
+        let pm = placeholder(
             400,
             300,
             &BackgroundMethod::Solid(ColorConfig::rgb(0, 0, 0)),
             "x",
-        );
-        assert_eq!(img.get_pixel(0, 0), &Rgb([0, 0, 0]));
+        )
+        .unwrap();
+        assert_eq!(pixel_at(&pm, 0, 0), (0, 0, 0));
         let mut max_brightness = 0u16;
-        let cx = img.width() / 2;
-        let cy = img.height() / 2;
+        let cx = pm.width() / 2;
+        let cy = pm.height() / 2;
         for dx in -50i32..=50 {
             for dy in -50i32..=50 {
-                let p = img.get_pixel((cx as i32 + dx) as u32, (cy as i32 + dy) as u32);
-                let b = p[0] as u16 + p[1] as u16 + p[2] as u16;
-                max_brightness = max_brightness.max(b);
+                let (r, g, b) = pixel_at(&pm, (cx as i32 + dx) as u32, (cy as i32 + dy) as u32);
+                max_brightness = max_brightness.max(r as u16 + g as u16 + b as u16);
             }
         }
         assert!(

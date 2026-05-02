@@ -1,5 +1,4 @@
 use ab_glyph::{Font, GlyphId, PxScale, ScaleFont, point};
-use image::RgbImage;
 use tiny_skia::{
     Color, FillRule, Mask, Paint, PathBuilder, Pixmap, PixmapPaint, PremultipliedColorU8, Shader,
     Transform,
@@ -150,29 +149,6 @@ pub fn asymmetric_rounded_rect_path(
     pb.cubic_to(x, y + lr - lcp, x + lr - lcp, y, x + lr, y);
     pb.close();
     pb.finish()
-}
-
-pub fn rgb_to_pixmap(img: &RgbImage) -> Option<Pixmap> {
-    let mut pm = Pixmap::new(img.width(), img.height())?;
-    let src = img.as_raw();
-    let dst = pm.pixels_mut();
-    for (i, pixel) in dst.iter_mut().enumerate() {
-        // Opaque source → premul == straight RGBA.
-        *pixel = PremultipliedColorU8::from_rgba(src[i * 3], src[i * 3 + 1], src[i * 3 + 2], 255)
-            .expect("alpha=255, always valid");
-    }
-    Some(pm)
-}
-
-pub fn pixmap_to_rgb(pm: &Pixmap, img: &mut RgbImage) {
-    // Compositing onto an opaque base keeps alpha at 255, so premul == straight.
-    let src = pm.pixels();
-    let dst = img.as_mut();
-    for (i, p) in src.iter().enumerate() {
-        dst[i * 3] = p.red();
-        dst[i * 3 + 1] = p.green();
-        dst[i * 3 + 2] = p.blue();
-    }
 }
 
 pub fn place(

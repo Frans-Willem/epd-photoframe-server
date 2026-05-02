@@ -15,13 +15,10 @@
 use std::sync::LazyLock;
 
 use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
-use image::RgbImage;
 use tiny_skia::{FillRule, Mask, Paint, Path, PathBuilder, Pixmap, Rect, Shader, Transform};
 
 use crate::config::{BatteryIndicatorConfig, BatteryStyle, ColorConfig};
-use crate::overlay::{
-    asymmetric_rounded_rect_path, draw_line, line_width, pixmap_to_rgb, place, rgb_to_pixmap,
-};
+use crate::overlay::{asymmetric_rounded_rect_path, draw_line, line_width, place};
 
 static TEXT_FONT: LazyLock<FontRef<'static>> = LazyLock::new(|| {
     FontRef::try_from_slice(include_bytes!("../assets/LiberationSans-Bold.ttf"))
@@ -56,8 +53,8 @@ const TEXT_CANVAS_H: f32 = 10.0;
 const TEXT_SIZE: f32 = 11.5;
 const TEXT_VERTICAL_NUDGE: f32 = 2.5;
 
-pub fn apply(img: &mut RgbImage, cfg: &BatteryIndicatorConfig, pct: u8) {
-    render(img, cfg, pct.min(100));
+pub fn apply(pm: &mut Pixmap, cfg: &BatteryIndicatorConfig, pct: u8) {
+    render(pm, cfg, pct.min(100));
 }
 
 /// Pixel-space layout of the icon. `ox`/`oy` are the top-left of the
@@ -129,8 +126,8 @@ fn solid_paint(c: ColorConfig) -> Paint<'static> {
     }
 }
 
-fn render(img: &mut RgbImage, cfg: &BatteryIndicatorConfig, pct: u8) {
-    let scr_min = img.width().min(img.height()) as f32;
+fn render(pm: &mut Pixmap, cfg: &BatteryIndicatorConfig, pct: u8) {
+    let scr_min = pm.width().min(pm.height()) as f32;
     let outer_text_px = (scr_min * 0.035).max(12.0);
     let edge = (scr_min * 0.03).round() as u32;
     let scale = (outer_text_px * 1.4) / VIEWPORT_H;
@@ -146,17 +143,14 @@ fn render(img: &mut RgbImage, cfg: &BatteryIndicatorConfig, pct: u8) {
     };
 
     let (px, py) = place(
-        img.width(),
-        img.height(),
+        pm.width(),
+        pm.height(),
         content_w.ceil() as u32,
         content_h.ceil() as u32,
         cfg.position,
         edge,
     );
 
-    let Some(mut pm) = rgb_to_pixmap(img) else {
-        return;
-    };
     let layout = Layout {
         ox: px as f32,
         oy: py as f32,
@@ -166,14 +160,14 @@ fn render(img: &mut RgbImage, cfg: &BatteryIndicatorConfig, pct: u8) {
 
     match cfg.style {
         BatteryStyle::Icon => {
-            draw_silhouette(&mut pm, &layout, pct, fg, cfg.empty_color);
+            draw_silhouette(pm, &layout, pct, fg, cfg.empty_color);
         }
         BatteryStyle::Text => {
             let text = format!("{pct}%");
             let s = PxScale::from(outer_text_px);
             let baseline = layout.oy + font.as_scaled(s).ascent();
             draw_line(
-                &mut pm,
+                pm,
                 font,
                 s,
                 layout.ox,
@@ -184,12 +178,10 @@ fn render(img: &mut RgbImage, cfg: &BatteryIndicatorConfig, pct: u8) {
             );
         }
         BatteryStyle::Both => {
-            draw_silhouette(&mut pm, &layout, pct, fg, cfg.empty_color);
-            draw_inverted_text(&mut pm, font, &layout, pct, fg, cfg.empty_color);
+            draw_silhouette(pm, &layout, pct, fg, cfg.empty_color);
+            draw_inverted_text(pm, font, &layout, pct, fg, cfg.empty_color);
         }
     }
-
-    pixmap_to_rgb(&pm, img);
 }
 
 /// Body silhouette filled with `empty`, level fill from the left in `fg`,
@@ -328,7 +320,7 @@ fn intersect_mask(dst: &mut Mask, other: &Mask) {
 mod tests {
     use super::*;
     use crate::config::{ColorConfig, Position};
-    use image::Rgb;
+    use tiny_skia::Color;
 
     fn cfg(style: BatteryStyle) -> BatteryIndicatorConfig {
         BatteryIndicatorConfig {
@@ -340,35 +332,43 @@ mod tests {
         }
     }
 
-    fn any_pixel_changed(img: &RgbImage, original: Rgb<u8>) -> bool {
-        img.pixels().any(|p| p != &original)
+    fn canvas(w: u32, h: u32, fill: (u8, u8, u8)) -> Pixmap {
+        let mut pm = Pixmap::new(w, h).expect("valid size");
+        pm.fill(Color::from_rgba8(fill.0, fill.1, fill.2, 255));
+        pm
+    }
+
+    fn any_pixel_changed(pm: &Pixmap, original: (u8, u8, u8)) -> bool {
+        pm.pixels()
+            .iter()
+            .any(|p| (p.red(), p.green(), p.blue()) != original)
     }
 
     #[test]
     fn renders_icon_only() {
-        let mut img = RgbImage::from_pixel(800, 600, Rgb([120, 120, 120]));
-        render(&mut img, &cfg(BatteryStyle::Icon), 75);
-        assert!(any_pixel_changed(&img, Rgb([120, 120, 120])));
+        let mut pm = canvas(800, 600, (120, 120, 120));
+        render(&mut pm, &cfg(BatteryStyle::Icon), 75);
+        assert!(any_pixel_changed(&pm, (120, 120, 120)));
     }
 
     #[test]
     fn renders_text_only() {
-        let mut img = RgbImage::from_pixel(800, 600, Rgb([120, 120, 120]));
-        render(&mut img, &cfg(BatteryStyle::Text), 50);
-        assert!(any_pixel_changed(&img, Rgb([120, 120, 120])));
+        let mut pm = canvas(800, 600, (120, 120, 120));
+        render(&mut pm, &cfg(BatteryStyle::Text), 50);
+        assert!(any_pixel_changed(&pm, (120, 120, 120)));
     }
 
     #[test]
     fn renders_both() {
-        let mut img = RgbImage::from_pixel(800, 600, Rgb([120, 120, 120]));
-        render(&mut img, &cfg(BatteryStyle::Both), 100);
-        assert!(any_pixel_changed(&img, Rgb([120, 120, 120])));
+        let mut pm = canvas(800, 600, (120, 120, 120));
+        render(&mut pm, &cfg(BatteryStyle::Both), 100);
+        assert!(any_pixel_changed(&pm, (120, 120, 120)));
     }
 
     #[test]
     fn clamps_above_100() {
-        let mut img = RgbImage::from_pixel(800, 600, Rgb([120, 120, 120]));
-        apply(&mut img, &cfg(BatteryStyle::Both), 250);
+        let mut pm = canvas(800, 600, (120, 120, 120));
+        apply(&mut pm, &cfg(BatteryStyle::Both), 250);
     }
 
     #[test]

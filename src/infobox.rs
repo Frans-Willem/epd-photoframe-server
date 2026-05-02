@@ -3,12 +3,10 @@ use std::sync::LazyLock;
 use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
 use chrono::{DateTime, Datelike, Utc};
 use chrono_tz::Tz;
-use image::RgbImage;
+use tiny_skia::Pixmap;
 
 use crate::config::{InfoboxConfig, Units};
-use crate::overlay::{
-    draw_line, line_width, paint_rounded_rect, pixmap_to_rgb, place, rgb_to_pixmap,
-};
+use crate::overlay::{draw_line, line_width, paint_rounded_rect, place};
 use crate::weather::DailyWeather;
 
 static TEXT_FONT: LazyLock<FontRef<'static>> = LazyLock::new(|| {
@@ -29,17 +27,13 @@ impl Units {
     }
 }
 
-pub fn apply(img: &mut RgbImage, cfg: &InfoboxConfig, tz: &Tz, weather: Option<DailyWeather>) {
+pub fn apply(pm: &mut Pixmap, cfg: &InfoboxConfig, tz: &Tz, weather: Option<DailyWeather>) {
     let now = Utc::now().with_timezone(tz);
-    render(img, cfg, now, weather);
+    render(pm, cfg, now, weather);
 }
 
-fn render<T>(
-    img: &mut RgbImage,
-    cfg: &InfoboxConfig,
-    now: DateTime<T>,
-    weather: Option<DailyWeather>,
-) where
+fn render<T>(pm: &mut Pixmap, cfg: &InfoboxConfig, now: DateTime<T>, weather: Option<DailyWeather>)
+where
     T: chrono::TimeZone,
     T::Offset: std::fmt::Display,
 {
@@ -66,7 +60,7 @@ fn render<T>(
         None => (wmo_icon(None).to_string(), "Weather error".to_string()),
     };
 
-    let scr_min = img.width().min(img.height()) as f32;
+    let scr_min = pm.width().min(pm.height()) as f32;
     let text_px = (scr_min * 0.05).max(12.0);
     let icon_px = text_px * 1.3;
     let internal_pad = text_px * 0.6;
@@ -103,13 +97,10 @@ fn render<T>(
     let bg = cfg.background;
     let fg = cfg.foreground;
 
-    let (px, py) = place(img.width(), img.height(), box_w, box_h, cfg.position, edge);
+    let (px, py) = place(pm.width(), pm.height(), box_w, box_h, cfg.position, edge);
 
-    let Some(mut pm) = rgb_to_pixmap(img) else {
-        return;
-    };
     paint_rounded_rect(
-        &mut pm,
+        pm,
         px as f32,
         py as f32,
         box_w as f32,
@@ -122,7 +113,7 @@ fn render<T>(
     let mut slot_top = py as f32 + internal_pad;
     let fg_ts = fg.to_tiny_skia();
     draw_line(
-        &mut pm,
+        pm,
         text_font,
         text_scale,
         ox,
@@ -133,7 +124,7 @@ fn render<T>(
     );
     slot_top += text_line_h + line_gap;
     draw_line(
-        &mut pm,
+        pm,
         text_font,
         text_scale,
         ox,
@@ -146,10 +137,10 @@ fn render<T>(
     // Weather line: share a baseline so icon and temperature align visually.
     let baseline = slot_top + text_ascent.max(icon_ascent);
     draw_line(
-        &mut pm, icon_font, icon_scale, ox, baseline, &icon_text, fg_ts, None,
+        pm, icon_font, icon_scale, ox, baseline, &icon_text, fg_ts, None,
     );
     draw_line(
-        &mut pm,
+        pm,
         text_font,
         text_scale,
         ox + icon_w + icon_gap,
@@ -158,8 +149,6 @@ fn render<T>(
         fg_ts,
         None,
     );
-
-    pixmap_to_rgb(&pm, img);
 }
 
 const MONTHS: [&str; 12] = [
@@ -205,7 +194,7 @@ mod tests {
     use super::*;
     use crate::config::{ColorConfig, Position};
     use chrono::TimeZone;
-    use image::Rgb;
+    use tiny_skia::Color;
 
     fn cfg() -> InfoboxConfig {
         InfoboxConfig {
@@ -218,28 +207,37 @@ mod tests {
         }
     }
 
+    fn canvas(w: u32, h: u32, fill: (u8, u8, u8)) -> Pixmap {
+        let mut pm = Pixmap::new(w, h).expect("valid size");
+        pm.fill(Color::from_rgba8(fill.0, fill.1, fill.2, 255));
+        pm
+    }
+
+    fn pixel_at(pm: &Pixmap, x: u32, y: u32) -> (u8, u8, u8) {
+        let p = pm.pixel(x, y).expect("in-bounds");
+        (p.red(), p.green(), p.blue())
+    }
+
     #[test]
     fn renders_without_panicking() {
-        let mut img = RgbImage::from_pixel(800, 600, Rgb([120, 120, 120]));
+        let mut pm = canvas(800, 600, (120, 120, 120));
         let now = Utc.with_ymd_and_hms(2026, 4, 20, 12, 0, 0).unwrap();
         let weather = DailyWeather {
             temperature_min: 8.0,
             temperature_max: 18.0,
             weather_code: 3,
         };
-        render(&mut img, &cfg(), now, Some(weather));
+        render(&mut pm, &cfg(), now, Some(weather));
         // A corner pixel inside the box should no longer be the original grey.
-        let corner = img.get_pixel(50, 550);
-        assert_ne!(corner, &Rgb([120, 120, 120]));
+        assert_ne!(pixel_at(&pm, 50, 550), (120, 120, 120));
     }
 
     #[test]
     fn renders_no_weather_without_panicking() {
-        let mut img = RgbImage::from_pixel(800, 600, Rgb([120, 120, 120]));
+        let mut pm = canvas(800, 600, (120, 120, 120));
         let now = Utc.with_ymd_and_hms(2026, 4, 20, 12, 0, 0).unwrap();
-        render(&mut img, &cfg(), now, None);
-        let corner = img.get_pixel(50, 550);
-        assert_ne!(corner, &Rgb([120, 120, 120]));
+        render(&mut pm, &cfg(), now, None);
+        assert_ne!(pixel_at(&pm, 50, 550), (120, 120, 120));
     }
 
     #[test]
