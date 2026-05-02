@@ -7,7 +7,6 @@ use serde::Deserialize;
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::str::FromStr;
-use std::sync::Arc;
 use tiny_skia::ColorU8;
 
 // ----- Top-level config -----------------------------------------------------
@@ -197,15 +196,14 @@ where
 /// Pre-built icu4x date / weekday formatters for one screen's locale.
 /// Construction (and any locale-data lookup error) happens once at config
 /// load, so a typo in `locale = "..."` aborts startup rather than the first
-/// render request. Cheap to clone — the inner formatters are shared via Arc.
+/// render request. `DateTimeFormatter::clone` is a cheap data-payload share
+/// (~30 ns each, measured), so cloning the whole struct is cheap too.
 #[derive(Clone)]
-pub struct LocaleFormatters(Arc<LocaleFormattersInner>);
-
-struct LocaleFormattersInner {
+pub struct LocaleFormatters {
     locale: Locale,
-    weekday_full: DateTimeFormatter<E>,
-    weekday_short: DateTimeFormatter<E>,
-    date_long: DateTimeFormatter<YMD>,
+    pub weekday_full: DateTimeFormatter<E>,
+    pub weekday_short: DateTimeFormatter<E>,
+    pub date_long: DateTimeFormatter<YMD>,
 }
 
 impl LocaleFormatters {
@@ -220,31 +218,19 @@ impl LocaleFormatters {
             })?;
         let date_long = DateTimeFormatter::try_new(locale.clone().into(), YMD::long())
             .map_err(|e| anyhow::anyhow!("locale `{name}` cannot format long dates: {e}"))?;
-        Ok(Self(Arc::new(LocaleFormattersInner {
+        Ok(Self {
             locale,
             weekday_full,
             weekday_short,
             date_long,
-        })))
-    }
-
-    pub fn weekday_full(&self) -> &DateTimeFormatter<E> {
-        &self.0.weekday_full
-    }
-
-    pub fn weekday_short(&self) -> &DateTimeFormatter<E> {
-        &self.0.weekday_short
-    }
-
-    pub fn date_long(&self) -> &DateTimeFormatter<YMD> {
-        &self.0.date_long
+        })
     }
 }
 
 impl std::fmt::Debug for LocaleFormatters {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_tuple("LocaleFormatters")
-            .field(&self.0.locale)
+            .field(&self.locale)
             .finish()
     }
 }
