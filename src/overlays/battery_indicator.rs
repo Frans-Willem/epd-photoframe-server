@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use taffy::prelude::*;
 use tiny_skia::{FillRule, Mask, Paint, Path, PathBuilder, Pixmap, Rect, Shader, Transform};
 
-use super::drawable::{Drawable, paint, position_to_flex};
+use super::drawable::{self, Drawable, paint};
 use super::{Overlay, OverlayContext, ReadyOverlay};
 use crate::config::{BatteryIndicatorConfig, BatteryStyle, ColorConfig};
 use crate::draw::{asymmetric_rounded_rect_path, draw_line, line_width};
@@ -97,32 +97,17 @@ impl ReadyOverlay for ReadyBatteryIndicator {
         let outer_text_px = (scr_min * 0.035).max(12.0);
         let edge = (scr_min * 0.03).round() as u32;
         let scale = (outer_text_px * 1.4) / VIEWPORT_H;
-        let font = &*TEXT_FONT;
 
-        let (content_w, content_h): (f32, f32) = match cfg.style {
-            BatteryStyle::Icon | BatteryStyle::Both => (VIEWPORT_W * scale, VIEWPORT_H * scale),
-            BatteryStyle::Text => {
-                let text = format!("{pct}%");
-                let s = PxScale::from(outer_text_px);
-                (line_width(font, s, &text), font.as_scaled(s).height())
-            }
-        };
-
-        // Same shape as the infobox: a viewport flex sized to the canvas
-        // with the indicator as a single sized leaf, anchored via
-        // `position_to_flex`. The leaf carries a `BatteryNode` context
-        // that knows how to paint the silhouette, level fill, and text.
-        let mut tree: TaffyTree<BatteryNode> = TaffyTree::new();
+        // Same shape as the infobox: a viewport flex with the indicator
+        // as a single content-sized leaf, anchored via `cfg.position`.
+        // The leaf carries a `BatteryDrawable` context whose `measure`
+        // returns the icon-or-text size and whose `draw` paints the
+        // silhouette, level fill, and text.
+        let mut tree: TaffyTree<BatteryDrawable> = TaffyTree::new();
         let icon = tree
             .new_leaf_with_context(
-                Style {
-                    size: Size {
-                        width: length(content_w),
-                        height: length(content_h),
-                    },
-                    ..Default::default()
-                },
-                BatteryNode {
+                Style::default(),
+                BatteryDrawable {
                     cfg: cfg.clone(),
                     pct,
                     scale,
@@ -130,42 +115,42 @@ impl ReadyOverlay for ReadyBatteryIndicator {
                 },
             )
             .expect("create battery leaf");
-        let (justify, align) = position_to_flex(cfg.position);
-        let viewport = tree
-            .new_with_children(
-                Style {
-                    display: Display::Flex,
-                    flex_direction: FlexDirection::Row,
-                    size: Size {
-                        width: length(canvas.width() as f32),
-                        height: length(canvas.height() as f32),
-                    },
-                    padding: taffy::Rect::length(edge as f32),
-                    justify_content: Some(justify),
-                    align_items: Some(align),
-                    ..Default::default()
-                },
-                &[icon],
-            )
-            .expect("create viewport");
-
+        let viewport = drawable::viewport(&mut tree, cfg.position, edge as f32, &[icon]);
         paint(&mut tree, viewport, canvas);
     }
 }
 
-/// The battery-specific drawable: knows how to paint the silhouette,
-/// level fill, and (optional) percentage text at a given top-left
-/// position in viewport units scaled by `scale`. The leaf carrying
-/// this context declares its size via taffy `Style.size`, so the
-/// default `measure() -> ZERO` is fine.
-struct BatteryNode {
+/// The battery-specific drawable: knows its own size (via [`measure`])
+/// and how to paint the silhouette, level fill, and (optional)
+/// percentage text at the top-left assigned by taffy.
+///
+/// [`measure`]: Drawable::measure
+struct BatteryDrawable {
     cfg: BatteryIndicatorConfig,
     pct: u8,
     scale: f32,
     outer_text_px: f32,
 }
 
-impl Drawable for BatteryNode {
+impl Drawable for BatteryDrawable {
+    fn measure(&self) -> Size<f32> {
+        match self.cfg.style {
+            BatteryStyle::Icon | BatteryStyle::Both => Size {
+                width: VIEWPORT_W * self.scale,
+                height: VIEWPORT_H * self.scale,
+            },
+            BatteryStyle::Text => {
+                let font: &FontRef<'static> = &TEXT_FONT;
+                let text = format!("{}%", self.pct);
+                let s = PxScale::from(self.outer_text_px);
+                Size {
+                    width: line_width(font, s, &text),
+                    height: font.as_scaled(s).height(),
+                }
+            }
+        }
+    }
+
     fn draw(&self, canvas: &mut Pixmap, x: f32, y: f32, _w: f32, _h: f32) {
         let font: &FontRef<'static> = &TEXT_FONT;
         let layout = Layout {

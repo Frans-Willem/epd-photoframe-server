@@ -417,6 +417,15 @@ pub enum Units {
     Imperial,
 }
 
+impl Units {
+    pub fn temperature_suffix(self) -> &'static str {
+        match self {
+            Units::Metric => "°C",
+            Units::Imperial => "°F",
+        }
+    }
+}
+
 /// Which lines the infobox draws above its weather panel. Each variant
 /// renders in the screen's local timezone using the screen's date format.
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
@@ -446,6 +455,18 @@ pub enum WeatherLayout {
     OnePlusFour,
     /// 5 compact day cells in a row, no special today treatment.
     Five,
+}
+
+impl WeatherLayout {
+    /// How many days the layout needs from `weather::forecast`. Zero
+    /// means the network call is skipped entirely.
+    pub fn forecast_days_required(self) -> u32 {
+        match self {
+            WeatherLayout::None => 0,
+            WeatherLayout::One => 1,
+            WeatherLayout::OnePlusFour | WeatherLayout::Five => 5,
+        }
+    }
 }
 
 // ----- Battery indicator ----------------------------------------------------

@@ -4,19 +4,10 @@ use chrono_tz::Tz;
 use taffy::prelude::*;
 use tiny_skia::Pixmap;
 
-use super::drawable::{GenericDrawable, TextSpan, paint, position_to_flex};
+use super::drawable::{self, GenericDrawable, TextSpan, paint};
 use super::{Overlay, OverlayContext, ReadyOverlay};
 use crate::config::{HeaderLayout, InfoboxConfig, Units, WeatherLayout};
 use crate::weather::{self, DailyWeather};
-
-impl Units {
-    fn temperature_suffix(self) -> &'static str {
-        match self {
-            Units::Metric => "°C",
-            Units::Imperial => "°F",
-        }
-    }
-}
 
 /// Date / time / weather overlay. Captures its config at construction;
 /// per request `preprocess` does the weather fetch and snapshots the
@@ -31,21 +22,10 @@ impl Infobox {
     }
 }
 
-/// Number of days the configured `weather_layout` wants from
-/// `weather::forecast`. Returns 0 when no weather is shown — used to
-/// skip the network call entirely.
-fn forecast_days(layout: WeatherLayout) -> u32 {
-    match layout {
-        WeatherLayout::None => 0,
-        WeatherLayout::One => 1,
-        WeatherLayout::OnePlusFour | WeatherLayout::Five => 5,
-    }
-}
-
 #[async_trait]
 impl Overlay for Infobox {
     async fn preprocess(&self, ctx: &OverlayContext<'_>) -> Box<dyn ReadyOverlay + Send> {
-        let days = forecast_days(self.cfg.weather_layout);
+        let days = self.cfg.weather_layout.forecast_days_required();
         let weather = if days == 0 {
             Vec::new()
         } else {
@@ -94,97 +74,11 @@ impl ReadyOverlay for ReadyInfobox {
         let icon_px = text_px * 1.3;
         let internal_pad = text_px * 0.6;
         let line_gap = text_px * 0.2;
-        let icon_gap = text_px * 0.3;
         let edge = (scr_min * 0.03).round() as u32;
         let radius = text_px * 0.6;
         let fg = cfg.foreground;
 
         let mut tree: TaffyTree<GenericDrawable> = TaffyTree::new();
-        let mut children: Vec<NodeId> = Vec::new();
-
-        // Header: zero, one, or two text lines.
-        if matches!(cfg.header_layout, HeaderLayout::Day | HeaderLayout::DayDate) {
-            let day_text = self.now.format("%A").to_string();
-            children.push(text_leaf(&mut tree, day_text, text_px, fg));
-        }
-        if matches!(
-            cfg.header_layout,
-            HeaderLayout::Date | HeaderLayout::DayDate
-        ) {
-            let date_text = format!(
-                "{} {} {}",
-                self.now.day(),
-                MONTHS[self.now.month0() as usize],
-                self.now.year()
-            );
-            children.push(text_leaf(&mut tree, date_text, text_px, fg));
-        }
-
-        // Weather panel. Today's icon+range line — used by `One` directly,
-        // and as the top of the `OnePlusFour` block.
-        let today_line = |tree: &mut TaffyTree<GenericDrawable>| {
-            // On weather-fetch failure, keep the line shape (icon + text) but
-            // show a short status string instead of the temperature range.
-            // The full error goes to the server-side log.
-            let (icon_glyph, weather_text) = match self.weather.first() {
-                Some(w) => (
-                    wmo_icon(Some(w.weather_code)),
-                    format!(
-                        "{:.0}–{:.0}{}",
-                        w.temperature_min.round(),
-                        w.temperature_max.round(),
-                        cfg.units.temperature_suffix()
-                    ),
-                ),
-                None => (wmo_icon(None), "Weather error".to_string()),
-            };
-            tree.new_leaf_with_context(
-                Style::default(),
-                GenericDrawable::MultiText(vec![
-                    TextSpan::icon(icon_glyph, icon_px, fg),
-                    TextSpan::text(weather_text, text_px, fg).with_gap_before(icon_gap),
-                ]),
-            )
-            .expect("create weather leaf")
-        };
-
-        match cfg.weather_layout {
-            WeatherLayout::None => (),
-            WeatherLayout::One => {
-                children.push(today_line(&mut tree));
-            }
-            WeatherLayout::OnePlusFour => {
-                children.push(today_line(&mut tree));
-                let style = CellStyle::one_plus_four(text_px);
-                let row = compact_cell_row(
-                    &mut tree,
-                    &style,
-                    self.now + chrono::Duration::days(1),
-                    (0..4).map(|i| self.weather.get(i + 1)),
-                    fg,
-                    cfg.units,
-                );
-                children.push(row);
-            }
-            WeatherLayout::Five => {
-                let style = CellStyle::five(text_px);
-                let row = compact_cell_row(
-                    &mut tree,
-                    &style,
-                    self.now,
-                    (0..5).map(|i| self.weather.get(i)),
-                    fg,
-                    cfg.units,
-                );
-                children.push(row);
-            }
-        }
-
-        // Both sections empty → no infobox at all.
-        if children.is_empty() {
-            return;
-        }
-
         let infobox = tree
             .new_with_children(
                 Style {
@@ -197,7 +91,7 @@ impl ReadyOverlay for ReadyInfobox {
                     },
                     ..Default::default()
                 },
-                &children,
+                &[],
             )
             .expect("create infobox");
         tree.set_node_context(
@@ -209,30 +103,84 @@ impl ReadyOverlay for ReadyInfobox {
         )
         .expect("attach background context");
 
-        // Outer viewport sized to the canvas, with the infobox as its only
-        // child. taffy positions the child via flex `justify_content` /
-        // `align_items` derived from `cfg.position`, plus uniform `edge`
-        // padding — one declarative step instead of separate intrinsic-
-        // size + manual `place()` arithmetic.
-        let (justify, align) = position_to_flex(cfg.position);
-        let viewport = tree
-            .new_with_children(
-                Style {
-                    display: Display::Flex,
-                    flex_direction: FlexDirection::Row,
-                    size: Size {
-                        width: length(canvas.width() as f32),
-                        height: length(canvas.height() as f32),
-                    },
-                    padding: Rect::length(edge as f32),
-                    justify_content: Some(justify),
-                    align_items: Some(align),
-                    ..Default::default()
-                },
-                &[infobox],
-            )
-            .expect("create viewport");
+        // Header: zero, one, or two text lines.
+        if matches!(cfg.header_layout, HeaderLayout::Day | HeaderLayout::DayDate) {
+            let day_text = self.now.format("%A").to_string();
+            let n = text_leaf(&mut tree, day_text, text_px, fg);
+            tree.add_child(infobox, n).expect("attach day line");
+        }
+        if matches!(
+            cfg.header_layout,
+            HeaderLayout::Date | HeaderLayout::DayDate
+        ) {
+            let date_text = format!(
+                "{} {} {}",
+                self.now.day(),
+                MONTHS[self.now.month0() as usize],
+                self.now.year()
+            );
+            let n = text_leaf(&mut tree, date_text, text_px, fg);
+            tree.add_child(infobox, n).expect("attach date line");
+        }
 
+        // Today's icon+range line — used by `One` directly, and as the
+        // top of the `OnePlusFour` block. On weather-fetch failure, keep
+        // the line shape (icon + text) but show a short status string
+        // instead of the temperature range; the full error goes to the
+        // server-side log.
+        if matches!(
+            cfg.weather_layout,
+            WeatherLayout::One | WeatherLayout::OnePlusFour
+        ) {
+            let (icon_glyph, weather_text) = match self.weather.first() {
+                Some(w) => (
+                    wmo_icon(Some(w.weather_code)),
+                    format!(
+                        "{:.0}–{:.0}{}",
+                        w.temperature_min.round(),
+                        w.temperature_max.round(),
+                        cfg.units.temperature_suffix()
+                    ),
+                ),
+                None => (wmo_icon(None), "Weather error".to_string()),
+            };
+            let n = tree
+                .new_leaf_with_context(
+                    Style::default(),
+                    GenericDrawable::MultiText(vec![
+                        TextSpan::weather_icon(icon_glyph, icon_px, fg),
+                        TextSpan::text(format!(" {weather_text}"), text_px, fg),
+                    ]),
+                )
+                .expect("create today line leaf");
+            tree.add_child(infobox, n).expect("attach today line");
+        }
+
+        if cfg.weather_layout == WeatherLayout::OnePlusFour {
+            let row = compact_cell_row(
+                &mut tree,
+                &CellStyle::one_plus_four(text_px),
+                self.now + chrono::Duration::days(1),
+                (0..4).map(|i| self.weather.get(i + 1)),
+                fg,
+                cfg.units,
+            );
+            tree.add_child(infobox, row).expect("attach 4-cell row");
+        }
+
+        if cfg.weather_layout == WeatherLayout::Five {
+            let row = compact_cell_row(
+                &mut tree,
+                &CellStyle::five(text_px),
+                self.now,
+                (0..5).map(|i| self.weather.get(i)),
+                fg,
+                cfg.units,
+            );
+            tree.add_child(infobox, row).expect("attach 5-cell row");
+        }
+
+        let viewport = drawable::viewport(&mut tree, cfg.position, edge as f32, &[infobox]);
         paint(&mut tree, viewport, canvas);
     }
 
@@ -240,8 +188,8 @@ impl ReadyOverlay for ReadyInfobox {
         // Catches both the "fetch failed" case (`weather` is empty) and the
         // "fetch returned fewer days than the layout asked for" case (e.g.
         // Open-Meteo returns 3 of 5 requested days). Layouts that don't
-        // request weather (`forecast_days == 0`) are never degraded.
-        self.weather.len() < forecast_days(self.cfg.weather_layout) as usize
+        // request weather (zero days required) are never degraded.
+        self.weather.len() < self.cfg.weather_layout.forecast_days_required() as usize
     }
 }
 
@@ -327,7 +275,11 @@ fn compact_cell(
     let icon_node = tree
         .new_leaf_with_context(
             Style::default(),
-            GenericDrawable::MultiText(vec![TextSpan::icon(icon_glyph, style.icon_size, color)]),
+            GenericDrawable::MultiText(vec![TextSpan::weather_icon(
+                icon_glyph,
+                style.icon_size,
+                color,
+            )]),
         )
         .expect("create icon leaf");
     let max_node = text_leaf(tree, max_temp, style.temp_size, color);
@@ -601,12 +553,12 @@ mod tests {
     }
 
     #[test]
-    fn empty_layout_is_a_noop() {
+    fn renders_empty_box_when_both_sections_off() {
         let mut pm = canvas(800, 600);
         ready_with(HeaderLayout::None, WeatherLayout::None, Vec::new()).render(&mut pm);
-        // Fresh Pixmap is fully transparent; render with both sections off
-        // must leave it that way.
-        assert!(pm.pixels().iter().all(|p| p.alpha() == 0));
+        // With both sections off the infobox still draws its rounded
+        // background — sized just to its uniform internal padding.
+        crate::test_snapshot::assert_matches(&pm, "infobox/empty_box");
     }
 
     #[test]

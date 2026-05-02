@@ -7,7 +7,7 @@
 //! Two implementors today: [`GenericDrawable`] — a small grab-bag of
 //! rendering primitives (`MultiText` for one or more shared-baseline
 //! text spans, `RoundedRect` for a flat fill) — and
-//! `overlays::battery_indicator::BatteryNode`, which paints a single
+//! `overlays::battery_indicator::BatteryDrawable`, which paints a single
 //! self-contained battery icon.
 //!
 //! Each overlay builds a `TaffyTree<MyDrawable>`, attaches its
@@ -41,7 +41,7 @@ pub trait Drawable {
 /// `justify_content` (horizontal) / `align_items` (vertical) pair
 /// that anchors a single child in that position inside a viewport-
 /// sized container with uniform padding.
-pub fn position_to_flex(p: Position) -> (JustifyContent, AlignItems) {
+fn position_to_flex(p: Position) -> (JustifyContent, AlignItems) {
     use Position::*;
     match p {
         TopLeft => (JustifyContent::Start, AlignItems::Start),
@@ -53,6 +53,35 @@ pub fn position_to_flex(p: Position) -> (JustifyContent, AlignItems) {
         Bottom => (JustifyContent::Center, AlignItems::End),
         BottomRight => (JustifyContent::End, AlignItems::End),
     }
+}
+
+/// Build a viewport-sized flex container that anchors `children` per
+/// `position` inside a uniform `padding`. Use as the root passed to
+/// [`paint`]: the container fills the available space (`paint` supplies
+/// canvas dimensions), so the caller doesn't have to thread them in.
+pub fn viewport<C: Drawable>(
+    tree: &mut TaffyTree<C>,
+    position: Position,
+    padding: f32,
+    children: &[NodeId],
+) -> NodeId {
+    let (justify, align) = position_to_flex(position);
+    tree.new_with_children(
+        Style {
+            display: Display::Flex,
+            flex_direction: FlexDirection::Row,
+            size: Size {
+                width: percent(1.0),
+                height: percent(1.0),
+            },
+            padding: Rect::length(padding),
+            justify_content: Some(justify),
+            align_items: Some(align),
+            ..Default::default()
+        },
+        children,
+    )
+    .expect("create viewport")
 }
 
 /// Compute layout for `tree` rooted at `root` (sized to the canvas)
@@ -113,46 +142,34 @@ pub fn icon_font() -> &'static FontRef<'static> {
 
 /// One contiguous run of text in a single font / size / color. Used
 /// as the building block of [`GenericDrawable::MultiText`]: each span
-/// is drawn flush against the previous one, with `gap_before` extra
-/// horizontal space inserted *between* spans (ignored on the first).
+/// is drawn flush against the previous one. Insert a leading space in
+/// `content` if you want visual separation from the previous span.
 pub struct TextSpan {
     pub content: String,
     pub font: &'static FontRef<'static>,
     pub color: ColorConfig,
     pub size: f32,
-    /// Horizontal space inserted before this span. Ignored when the
-    /// span is the first in its `MultiText`.
-    pub gap_before: f32,
 }
 
 impl TextSpan {
-    /// Body-text span (Liberation Sans Bold), no leading gap.
+    /// Body-text span (Liberation Sans Bold).
     pub fn text(content: impl Into<String>, size: f32, color: ColorConfig) -> Self {
         Self {
             content: content.into(),
             font: text_font(),
             color,
             size,
-            gap_before: 0.0,
         }
     }
 
-    /// Single weather-icon glyph, no leading gap.
-    pub fn icon(glyph: char, size: f32, color: ColorConfig) -> Self {
+    /// Single Weather Icons glyph.
+    pub fn weather_icon(glyph: char, size: f32, color: ColorConfig) -> Self {
         Self {
             content: glyph.to_string(),
             font: icon_font(),
             color,
             size,
-            gap_before: 0.0,
         }
-    }
-
-    /// Builder: set the gap inserted before this span when it's not
-    /// first in a `MultiText`.
-    pub fn with_gap_before(mut self, gap: f32) -> Self {
-        self.gap_before = gap;
-        self
     }
 }
 
@@ -178,12 +195,9 @@ impl Drawable for GenericDrawable {
             GenericDrawable::MultiText(spans) => {
                 let mut width = 0.0;
                 let mut height = 0.0_f32;
-                for (i, span) in spans.iter().enumerate() {
+                for span in spans {
                     let scale = PxScale::from(span.size);
                     let scaled = span.font.as_scaled(scale);
-                    if i > 0 {
-                        width += span.gap_before;
-                    }
                     width += line_width(span.font, scale, &span.content);
                     height = height.max(scaled.height());
                 }
@@ -205,11 +219,8 @@ impl Drawable for GenericDrawable {
                     .map(|s| s.font.as_scaled(PxScale::from(s.size)).ascent())
                     .fold(0.0_f32, f32::max);
                 let mut cursor = x;
-                for (i, span) in spans.iter().enumerate() {
+                for span in spans {
                     let scale = PxScale::from(span.size);
-                    if i > 0 {
-                        cursor += span.gap_before;
-                    }
                     draw_line(
                         canvas,
                         span.font,
