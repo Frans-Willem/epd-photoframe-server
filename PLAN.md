@@ -414,7 +414,7 @@ output is pixel-identical to the current code for the default config.
 
 # Sequencing
 
-Total: 9 commits across 4 stages, each step independently shippable.
+Total: 8 commits across 4 stages, each step independently shippable.
 Each step ends with the build green and existing tests passing.
 Behaviour changes are explicit in the step description; pure refactors
 are called out.
@@ -525,42 +525,42 @@ guarantee no pixel drift.
 `without_weather` pass without regenerating. `cargo build` and
 `cargo test` clean.
 
-## Stage 4 — Multi-day layouts (6 commits)
+## Stage 4 — Multi-day layouts (5 commits)
 
-### Step 4 — Add `HeaderLayout` + `WeatherLayout` config (no behaviour change)
+### Step 4 — Add layout config + wire single-day combinations
 
-**Files:** `src/config.rs`, `src/infobox.rs` (constructor only).
+**Files:** `src/config.rs`, `src/overlays/infobox.rs`.
 
-**Changes:**
-- Add `HeaderLayout` (`None | Date | Day | DayDate`) and
-  `WeatherLayout` (`None | One | OnePlusFour | Five`) enums with
-  `#[serde(rename_all = "kebab-case")]` and `Default` impls.
-- Add fields to `InfoboxConfig` with `#[serde(default)]`.
-- Plumb into `Infobox` overlay constructor; constructor stores them
-  but rendering still ignores them.
-
-**Acceptance:** `cargo build` clean. Default config and an explicit
-`header_layout = "day-date"` / `weather_layout = "one"` both render
-identically to before.
-
-### Step 5 — Wire layout fields for all single-day combinations
-
-**Files:** `src/infobox.rs`.
+Config plumbing and the rendering wiring land together — adding
+fields nothing reads is the same scaffold-only pattern we've avoided
+in the previous stages.
 
 **Changes:**
-- Honour `header_layout` and `weather_layout` for the variants that
-  don't need multi-day data: `None | Date | Day | DayDate` × `None |
-  One`. The tree-builder selects which sections to add based on the
-  config.
-- `weather_layout = none` skips the weather fetch in
-  `Infobox::preprocess` (no Open-Meteo call when not needed).
-- The all-`none` case skips the box draw entirely (no Pixmap writes).
+- Add `HeaderLayout` (`None | Date | Day | DayDate`, default
+  `DayDate`) and `WeatherLayout` (`None | One | OnePlusFour | Five`,
+  default `One`) enums with `#[serde(rename_all = "kebab-case")]`
+  and `Default` impls. Add the matching `#[serde(default)]` fields
+  to `InfoboxConfig`.
+- `Infobox::render` honours both fields for the single-day
+  combinations: `None | Date | Day | DayDate` × `None | One`. Each
+  section's leaves are pushed onto a `Vec<NodeId>` conditionally;
+  when both sections are empty the render is a no-op (no Pixmap
+  writes).
+- `OnePlusFour` and `Five` arms fall through to the same single
+  weather line as `One` for now — a placeholder. Steps 6–7 replace
+  these arms with the multi-day tree-builders.
+- `Infobox::preprocess` skips the Open-Meteo fetch entirely when
+  `weather_layout = none`. `ReadyOverlay::degraded` becomes the
+  separate `weather_failed` flag rather than `weather.is_none()`,
+  so "weather not requested" doesn't read as degradation.
 
-**Acceptance:** Render-without-panic tests for each new combination.
-Header-only and weather-only render correctly; `none + none` is a
-no-op overlay.
+**Acceptance:** Existing `with_weather` / `without_weather`
+snapshots unchanged (default config). New snapshots for
+`header_only`, `weather_only`, `day_only_header`,
+`date_only_header`. `empty_layout_is_a_noop` asserts the canvas
+stays transparent. `cargo test` clean.
 
-### Step 6 — Generalise weather fetch + add `compact_cell` tree-builder
+### Step 5 — Generalise weather fetch + add `compact_cell` tree-builder
 
 **Files:** `src/weather.rs`, `src/infobox.rs` (or new helper module).
 
@@ -579,7 +579,7 @@ no-op overlay.
 **Acceptance:** Existing single-day infobox behaviour unchanged
 (snapshot test still passes); helper test passes.
 
-### Step 7 — Implement `weather_layout = one-plus-four`
+### Step 6 — Implement `weather_layout = one-plus-four`
 
 **Files:** `src/infobox.rs`.
 
@@ -591,7 +591,7 @@ no-op overlay.
 **Acceptance:** New layout renders; tests pass; manual visual check
 on E1004 matches the mockup.
 
-### Step 8 — Implement `weather_layout = five`
+### Step 7 — Implement `weather_layout = five`
 
 **Files:** `src/infobox.rs`.
 
@@ -603,7 +603,7 @@ on E1004 matches the mockup.
 **Acceptance:** New layout renders; tests pass; manual visual check
 on E1004 matches the mockup.
 
-### Step 9 — Documentation
+### Step 8 — Documentation
 
 **Files:** `README.md`, `config.example.toml`.
 

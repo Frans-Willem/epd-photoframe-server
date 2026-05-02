@@ -6,7 +6,7 @@ use tiny_skia::Pixmap;
 
 use super::drawable::{Drawable, walk};
 use super::{Overlay, OverlayContext, ReadyOverlay};
-use crate::config::{InfoboxConfig, Units};
+use crate::config::{HeaderLayout, InfoboxConfig, Units, WeatherLayout};
 use crate::draw::place;
 use crate::weather::{self, DailyWeather};
 
@@ -35,28 +35,35 @@ impl Infobox {
 #[async_trait]
 impl Overlay for Infobox {
     async fn preprocess(&self, ctx: &OverlayContext<'_>) -> Box<dyn ReadyOverlay + Send> {
-        // `ctx.now` is already in the screen's timezone (set by the request
-        // handler); pull the tz name for the weather query off of it.
-        let tz_name = ctx.now.timezone().name();
-        let weather = match weather::daily(
-            ctx.http,
-            self.cfg.latitude,
-            self.cfg.longitude,
-            tz_name,
-            self.cfg.units,
-        )
-        .await
-        {
-            Ok(w) => Some(w),
-            Err(e) => {
-                tracing::warn!(error = %format!("{e:#}"), "weather fetch failed; infobox will show error");
-                None
+        // Skip the network round-trip entirely when the configured layout
+        // doesn't ask for weather.
+        let (weather, weather_failed) = if matches!(self.cfg.weather_layout, WeatherLayout::None) {
+            (None, false)
+        } else {
+            // `ctx.now` is already in the screen's timezone (set by the request
+            // handler); pull the tz name for the weather query off of it.
+            let tz_name = ctx.now.timezone().name();
+            match weather::daily(
+                ctx.http,
+                self.cfg.latitude,
+                self.cfg.longitude,
+                tz_name,
+                self.cfg.units,
+            )
+            .await
+            {
+                Ok(w) => (Some(w), false),
+                Err(e) => {
+                    tracing::warn!(error = %format!("{e:#}"), "weather fetch failed; infobox will show error");
+                    (None, true)
+                }
             }
         };
         Box::new(ReadyInfobox {
             cfg: self.cfg.clone(),
             now: ctx.now,
             weather,
+            weather_failed,
         })
     }
 }
@@ -65,35 +72,15 @@ struct ReadyInfobox {
     cfg: InfoboxConfig,
     now: DateTime<Tz>,
     weather: Option<DailyWeather>,
+    /// True iff a weather fetch was attempted *and* failed. Distinguishes
+    /// "weather not requested" (no degradation) from "weather fetch
+    /// failed" (degraded — retry sooner).
+    weather_failed: bool,
 }
 
 impl ReadyOverlay for ReadyInfobox {
     fn render(&self, canvas: &mut Pixmap) {
         let cfg = &self.cfg;
-        let day_text = self.now.format("%A").to_string();
-        let date_text = format!(
-            "{} {} {}",
-            self.now.day(),
-            MONTHS[self.now.month0() as usize],
-            self.now.year()
-        );
-        // On weather-fetch failure, keep the line shape (icon + text) but show
-        // a short status string instead of the temperature range. The full
-        // error goes to the server-side log; the box is too narrow for a
-        // useful detail.
-        let (icon_glyph, weather_text) = match self.weather {
-            Some(w) => (
-                wmo_icon(Some(w.weather_code)),
-                format!(
-                    "{:.0}–{:.0}{}",
-                    w.temperature_min.round(),
-                    w.temperature_max.round(),
-                    cfg.units.temperature_suffix()
-                ),
-            ),
-            None => (wmo_icon(None), "Weather error".to_string()),
-        };
-
         let scr_min = canvas.width().min(canvas.height()) as f32;
         let text_px = (scr_min * 0.05).max(12.0);
         let icon_px = text_px * 1.3;
@@ -104,43 +91,72 @@ impl ReadyOverlay for ReadyInfobox {
         let radius = text_px * 0.6;
         let fg = cfg.foreground;
 
-        // Build the layout tree: a Column flex with three children (day, date,
-        // weather line), with a rounded background attached to the root so it
-        // paints first during the walk.
         let mut tree: TaffyTree<Drawable> = TaffyTree::new();
-        let day = tree
-            .new_leaf_with_context(
-                Style::default(),
-                Drawable::Text {
-                    content: day_text,
-                    size: text_px,
-                    color: fg,
-                },
-            )
-            .expect("create day leaf");
-        let date = tree
-            .new_leaf_with_context(
-                Style::default(),
-                Drawable::Text {
-                    content: date_text,
-                    size: text_px,
-                    color: fg,
-                },
-            )
-            .expect("create date leaf");
-        let weather = tree
-            .new_leaf_with_context(
-                Style::default(),
-                Drawable::IconText {
-                    icon: icon_glyph,
-                    icon_size: icon_px,
-                    gap: icon_gap,
-                    text: weather_text,
-                    text_size: text_px,
-                    color: fg,
-                },
-            )
-            .expect("create weather leaf");
+        let mut children: Vec<NodeId> = Vec::new();
+
+        // Header: zero, one, or two text lines.
+        if matches!(cfg.header_layout, HeaderLayout::Day | HeaderLayout::DayDate) {
+            let day_text = self.now.format("%A").to_string();
+            children.push(text_leaf(&mut tree, day_text, text_px, fg));
+        }
+        if matches!(
+            cfg.header_layout,
+            HeaderLayout::Date | HeaderLayout::DayDate
+        ) {
+            let date_text = format!(
+                "{} {} {}",
+                self.now.day(),
+                MONTHS[self.now.month0() as usize],
+                self.now.year()
+            );
+            children.push(text_leaf(&mut tree, date_text, text_px, fg));
+        }
+
+        // Weather panel. `OnePlusFour` and `Five` aren't implemented yet —
+        // they fall through to the same single-day line as `One` (which is
+        // also the previous behaviour, before the layout fields existed).
+        // Stage 4 steps 7–8 will replace these arms with the multi-day
+        // tree-builders.
+        match cfg.weather_layout {
+            WeatherLayout::None => (),
+            WeatherLayout::One | WeatherLayout::OnePlusFour | WeatherLayout::Five => {
+                // On weather-fetch failure, keep the line shape (icon + text)
+                // but show a short status string instead of the temperature
+                // range. The full error goes to the server-side log.
+                let (icon_glyph, weather_text) = match self.weather {
+                    Some(w) => (
+                        wmo_icon(Some(w.weather_code)),
+                        format!(
+                            "{:.0}–{:.0}{}",
+                            w.temperature_min.round(),
+                            w.temperature_max.round(),
+                            cfg.units.temperature_suffix()
+                        ),
+                    ),
+                    None => (wmo_icon(None), "Weather error".to_string()),
+                };
+                children.push(
+                    tree.new_leaf_with_context(
+                        Style::default(),
+                        Drawable::IconText {
+                            icon: icon_glyph,
+                            icon_size: icon_px,
+                            gap: icon_gap,
+                            text: weather_text,
+                            text_size: text_px,
+                            color: fg,
+                        },
+                    )
+                    .expect("create weather leaf"),
+                );
+            }
+        }
+
+        // Both sections empty → no infobox at all.
+        if children.is_empty() {
+            return;
+        }
+
         let root = tree
             .new_with_children(
                 Style {
@@ -153,7 +169,7 @@ impl ReadyOverlay for ReadyInfobox {
                     },
                     ..Default::default()
                 },
-                &[day, date, weather],
+                &children,
             )
             .expect("create root");
         tree.set_node_context(
@@ -196,9 +212,25 @@ impl ReadyOverlay for ReadyInfobox {
     }
 
     fn degraded(&self) -> bool {
-        // Weather fetch failed → render shows "Weather error", retry sooner.
-        self.weather.is_none()
+        self.weather_failed
     }
+}
+
+fn text_leaf(
+    tree: &mut TaffyTree<Drawable>,
+    content: String,
+    size: f32,
+    color: crate::config::ColorConfig,
+) -> NodeId {
+    tree.new_leaf_with_context(
+        Style::default(),
+        Drawable::Text {
+            content,
+            size,
+            color,
+        },
+    )
+    .expect("create text leaf")
 }
 
 const MONTHS: [&str; 12] = [
@@ -254,6 +286,8 @@ mod tests {
             latitude: 0.0,
             longitude: 0.0,
             units: Units::Metric,
+            header_layout: HeaderLayout::DayDate,
+            weather_layout: WeatherLayout::One,
         }
     }
 
@@ -263,33 +297,110 @@ mod tests {
         Pixmap::new(w, h).expect("valid size")
     }
 
-    fn ready(weather: Option<DailyWeather>) -> ReadyInfobox {
+    fn sample_weather() -> DailyWeather {
+        DailyWeather {
+            temperature_min: 8.0,
+            temperature_max: 18.0,
+            weather_code: 3,
+        }
+    }
+
+    fn ready_with(
+        header: HeaderLayout,
+        weather_layout: WeatherLayout,
+        weather: Option<DailyWeather>,
+        weather_failed: bool,
+    ) -> ReadyInfobox {
         ReadyInfobox {
-            cfg: cfg(),
+            cfg: InfoboxConfig {
+                header_layout: header,
+                weather_layout,
+                ..cfg()
+            },
             now: UTC.with_ymd_and_hms(2026, 4, 20, 12, 0, 0).unwrap(),
             weather,
+            weather_failed,
         }
     }
 
     #[test]
     fn renders_with_weather() {
         let mut pm = canvas(800, 600);
-        let weather = DailyWeather {
-            temperature_min: 8.0,
-            temperature_max: 18.0,
-            weather_code: 3,
-        };
-        ready(Some(weather)).render(&mut pm);
+        ready_with(
+            HeaderLayout::DayDate,
+            WeatherLayout::One,
+            Some(sample_weather()),
+            false,
+        )
+        .render(&mut pm);
         crate::test_snapshot::assert_matches(&pm, "infobox/with_weather");
     }
 
     #[test]
     fn renders_without_weather() {
         let mut pm = canvas(800, 600);
-        let r = ready(None);
+        let r = ready_with(HeaderLayout::DayDate, WeatherLayout::One, None, true);
         assert!(r.degraded());
         r.render(&mut pm);
         crate::test_snapshot::assert_matches(&pm, "infobox/without_weather");
+    }
+
+    #[test]
+    fn renders_header_only() {
+        let mut pm = canvas(800, 600);
+        let r = ready_with(HeaderLayout::DayDate, WeatherLayout::None, None, false);
+        // Weather not requested → not degraded even though `weather` is None.
+        assert!(!r.degraded());
+        r.render(&mut pm);
+        crate::test_snapshot::assert_matches(&pm, "infobox/header_only");
+    }
+
+    #[test]
+    fn renders_weather_only() {
+        let mut pm = canvas(800, 600);
+        let r = ready_with(
+            HeaderLayout::None,
+            WeatherLayout::One,
+            Some(sample_weather()),
+            false,
+        );
+        r.render(&mut pm);
+        crate::test_snapshot::assert_matches(&pm, "infobox/weather_only");
+    }
+
+    #[test]
+    fn renders_day_only_header() {
+        let mut pm = canvas(800, 600);
+        ready_with(
+            HeaderLayout::Day,
+            WeatherLayout::One,
+            Some(sample_weather()),
+            false,
+        )
+        .render(&mut pm);
+        crate::test_snapshot::assert_matches(&pm, "infobox/day_only_header");
+    }
+
+    #[test]
+    fn renders_date_only_header() {
+        let mut pm = canvas(800, 600);
+        ready_with(
+            HeaderLayout::Date,
+            WeatherLayout::One,
+            Some(sample_weather()),
+            false,
+        )
+        .render(&mut pm);
+        crate::test_snapshot::assert_matches(&pm, "infobox/date_only_header");
+    }
+
+    #[test]
+    fn empty_layout_is_a_noop() {
+        let mut pm = canvas(800, 600);
+        ready_with(HeaderLayout::None, WeatherLayout::None, None, false).render(&mut pm);
+        // Fresh Pixmap is fully transparent; render with both sections off
+        // must leave it that way.
+        assert!(pm.pixels().iter().all(|p| p.alpha() == 0));
     }
 
     #[test]
