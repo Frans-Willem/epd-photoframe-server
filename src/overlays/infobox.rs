@@ -6,8 +6,7 @@ use tiny_skia::Pixmap;
 
 use super::drawable::{Drawable, walk};
 use super::{Overlay, OverlayContext, ReadyOverlay};
-use crate::config::{HeaderLayout, InfoboxConfig, Units, WeatherLayout};
-use crate::draw::place;
+use crate::config::{HeaderLayout, InfoboxConfig, Position, Units, WeatherLayout};
 use crate::weather::{self, DailyWeather};
 
 impl Units {
@@ -29,6 +28,24 @@ pub struct Infobox {
 impl Infobox {
     pub fn new(cfg: InfoboxConfig) -> Self {
         Self { cfg }
+    }
+}
+
+/// Map a `Position` (one of the 8 corners + edges) to the flex
+/// `justify_content` (horizontal) / `align_items` (vertical) pair
+/// that anchors a single child in that position inside a viewport-
+/// sized container.
+fn position_to_flex(p: Position) -> (JustifyContent, AlignItems) {
+    use Position::*;
+    match p {
+        TopLeft => (JustifyContent::Start, AlignItems::Start),
+        Top => (JustifyContent::Center, AlignItems::Start),
+        TopRight => (JustifyContent::End, AlignItems::Start),
+        Left => (JustifyContent::Start, AlignItems::Center),
+        Right => (JustifyContent::End, AlignItems::Center),
+        BottomLeft => (JustifyContent::Start, AlignItems::End),
+        Bottom => (JustifyContent::Center, AlignItems::End),
+        BottomRight => (JustifyContent::End, AlignItems::End),
     }
 }
 
@@ -190,7 +207,7 @@ impl ReadyOverlay for ReadyInfobox {
             return;
         }
 
-        let root = tree
+        let infobox = tree
             .new_with_children(
                 Style {
                     display: Display::Flex,
@@ -204,9 +221,9 @@ impl ReadyOverlay for ReadyInfobox {
                 },
                 &children,
             )
-            .expect("create root");
+            .expect("create infobox");
         tree.set_node_context(
-            root,
+            infobox,
             Some(Drawable::Background {
                 color: cfg.background,
                 radius,
@@ -214,11 +231,35 @@ impl ReadyOverlay for ReadyInfobox {
         )
         .expect("attach background context");
 
+        // Outer viewport sized to the canvas, with the infobox as its only
+        // child. taffy positions the child via flex `justify_content` /
+        // `align_items` derived from `cfg.position`, plus uniform `edge`
+        // padding — one declarative step instead of separate intrinsic-
+        // size + manual `place()` arithmetic.
+        let (justify, align) = position_to_flex(cfg.position);
+        let viewport = tree
+            .new_with_children(
+                Style {
+                    display: Display::Flex,
+                    flex_direction: FlexDirection::Row,
+                    size: Size {
+                        width: length(canvas.width() as f32),
+                        height: length(canvas.height() as f32),
+                    },
+                    padding: Rect::length(edge as f32),
+                    justify_content: Some(justify),
+                    align_items: Some(align),
+                    ..Default::default()
+                },
+                &[infobox],
+            )
+            .expect("create viewport");
+
         tree.compute_layout_with_measure(
-            root,
+            viewport,
             Size {
-                width: AvailableSpace::MaxContent,
-                height: AvailableSpace::MaxContent,
+                width: AvailableSpace::Definite(canvas.width() as f32),
+                height: AvailableSpace::Definite(canvas.height() as f32),
             },
             |_known, _avail, _id, ctx, _style| {
                 ctx.map(|d: &mut Drawable| d.measure())
@@ -227,19 +268,7 @@ impl ReadyOverlay for ReadyInfobox {
         )
         .expect("compute layout");
 
-        let bbox = tree.layout(root).expect("root layout").size;
-        let box_w = bbox.width.ceil() as u32;
-        let box_h = bbox.height.ceil() as u32;
-        let (px, py) = place(
-            canvas.width(),
-            canvas.height(),
-            box_w,
-            box_h,
-            cfg.position,
-            edge,
-        );
-
-        walk(&tree, root, px as f32, py as f32, &mut |x, y, w, h, d| {
+        walk(&tree, viewport, 0.0, 0.0, &mut |x, y, w, h, d| {
             d.draw(canvas, x, y, w, h);
         });
     }
