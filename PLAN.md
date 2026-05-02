@@ -590,15 +590,22 @@ the 800×600 test canvas gives.
 
 ### Step 6 — Implement `weather_layout = five`
 
-**Files:** `src/infobox.rs`.
+**Files:** `src/overlays/infobox.rs`.
 
 **Changes:**
-- Add the 5-cell-row rendering using `compact_cell` with the smaller
-  font set, per the Phase 2 specs.
-- Render tests.
+- Refactor `compact_cell` / `compact_cell_row` to take a `CellStyle`
+  struct (font sizes + cell gap + extra-top-margin) so the same
+  builder can produce both `one-plus-four` and `five` rows. Add
+  `CellStyle::one_plus_four(text_px)` and `CellStyle::five(text_px)`
+  factory methods baking in the per-layout proportions.
+- `compact_cell_row` takes the `first_date` for the leftmost cell —
+  `one-plus-four` passes `today + 1 day`, `five` passes `today`
+  itself (no special today block).
+- `WeatherLayout::Five` arm: a single 5-cell row, no today line.
+  Renders nothing if weather is empty.
 
-**Acceptance:** New layout renders; tests pass; manual visual check
-on E1004 matches the mockup.
+**Acceptance:** New `infobox/five.png` snapshot. Existing snapshots
+unchanged.
 
 ### Step 7 — Documentation
 

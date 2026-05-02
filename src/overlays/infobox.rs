@@ -170,20 +170,25 @@ impl ReadyOverlay for ReadyInfobox {
                 // — Open-Meteo always returns the full requested range — but
                 // we don't want to crash the render if it does).
                 if self.weather.len() >= 2 {
+                    let style = CellStyle::one_plus_four(text_px);
                     let row = compact_cell_row(
                         &mut tree,
-                        self.now,
+                        &style,
+                        self.now + chrono::Duration::days(1),
                         &self.weather[1..],
-                        text_px,
                         fg,
                         cfg.units,
                     );
                     children.push(row);
                 }
             }
-            // `Five` lands in the next commit.
             WeatherLayout::Five => {
-                children.push(today_line(&mut tree));
+                if !self.weather.is_empty() {
+                    let style = CellStyle::five(text_px);
+                    let row =
+                        compact_cell_row(&mut tree, &style, self.now, &self.weather, fg, cfg.units);
+                    children.push(row);
+                }
             }
         }
 
@@ -268,42 +273,84 @@ fn text_leaf(
     .expect("create text leaf")
 }
 
+/// Sizing for one row of compact day-cells. The two multi-day
+/// layouts (`one-plus-four` and `five`) use slightly different
+/// proportions; this struct keeps the rendering helpers shape-agnostic.
+struct CellStyle {
+    weekday_size: f32,
+    icon_size: f32,
+    temp_size: f32,
+    gap_after_weekday: f32,
+    gap_after_icon: f32,
+    gap_after_max: f32,
+    /// Horizontal space between adjacent cells in a row.
+    cell_gap: f32,
+    /// Extra top margin on the row beyond the parent flex's
+    /// inter-section `line_gap`. Used by `one-plus-four` to give the
+    /// row a 16 px (instead of 12 px) clearance from the today line.
+    row_extra_top: f32,
+}
+
+impl CellStyle {
+    /// Sizing for the row in `one-plus-four`. Per the Phase 2 spec
+    /// at E1004 (`text_px = 60`): weekday 44, icon 56, temps 32,
+    /// 12 px cell-to-cell gap, 16 px gap above the row.
+    fn one_plus_four(text_px: f32) -> Self {
+        Self {
+            weekday_size: text_px * 0.73,
+            icon_size: text_px * 0.93,
+            temp_size: text_px * 0.53,
+            gap_after_weekday: text_px * 0.13,
+            gap_after_icon: text_px * 0.10,
+            gap_after_max: text_px * 0.07,
+            cell_gap: text_px * 0.20,
+            row_extra_top: text_px * 0.07,
+        }
+    }
+
+    /// Sizing for `five` — the 5-cell symmetric row. Per the Phase 2
+    /// spec at E1004: weekday 36, icon 48, temps 28, 10 px cell-to-
+    /// cell gap, no extra top margin (the row is the only weather
+    /// section, separated from the header by the standard `line_gap`).
+    fn five(text_px: f32) -> Self {
+        Self {
+            weekday_size: text_px * 0.60,
+            icon_size: text_px * 0.80,
+            temp_size: text_px * 0.47,
+            gap_after_weekday: text_px * 0.13,
+            gap_after_icon: text_px * 0.10,
+            gap_after_max: text_px * 0.07,
+            cell_gap: text_px * 0.17,
+            row_extra_top: 0.0,
+        }
+    }
+}
+
 /// Build one compact day-cell — vertical stack of weekday letter,
-/// weather icon, max temperature, min temperature. Sizes are
-/// expressed as ratios of the screen-derived `text_px` so the cell
-/// scales with the display.
+/// weather icon, max temperature, min temperature. Sizes come from
+/// `style` so the same builder serves both multi-day layouts.
 fn compact_cell(
     tree: &mut TaffyTree<Drawable>,
-    text_px: f32,
+    style: &CellStyle,
     weekday: String,
     icon_glyph: char,
     max_temp: String,
     min_temp: String,
     color: crate::config::ColorConfig,
 ) -> NodeId {
-    // PLAN spec for E1004 (`text_px=60`): weekday 44, icon 56, temps 32,
-    // gaps 8/6/4. Expressed here as ratios of `text_px` so smaller
-    // displays scale down proportionally.
-    let weekday_size = text_px * 0.73;
-    let icon_size = text_px * 0.93;
-    let temp_size = text_px * 0.53;
-    let gap_after_weekday = text_px * 0.13;
-    let gap_after_icon = text_px * 0.10;
-    let gap_after_max = text_px * 0.07;
-
-    let weekday_node = text_leaf(tree, weekday, weekday_size, color);
+    let weekday_node = text_leaf(tree, weekday, style.weekday_size, color);
     let icon_node = tree
         .new_leaf_with_context(
             Style::default(),
             Drawable::Icon {
                 glyph: icon_glyph,
-                size: icon_size,
+                size: style.icon_size,
                 color,
             },
         )
         .expect("create icon leaf");
-    let max_node = text_leaf(tree, max_temp, temp_size, color);
-    let min_node = text_leaf(tree, min_temp, temp_size, color);
+    let max_node = text_leaf(tree, max_temp, style.temp_size, color);
+    let min_node = text_leaf(tree, min_temp, style.temp_size, color);
 
     // Centre each row inside the cell so weekdays/temps of different
     // widths don't shift left.
@@ -324,9 +371,9 @@ fn compact_cell(
         .expect("set cell-child style");
     };
     centre(weekday_node, 0.0);
-    centre(icon_node, gap_after_weekday);
-    centre(max_node, gap_after_icon);
-    centre(min_node, gap_after_max);
+    centre(icon_node, style.gap_after_weekday);
+    centre(max_node, style.gap_after_icon);
+    centre(min_node, style.gap_after_max);
 
     tree.new_with_children(
         Style {
@@ -340,34 +387,26 @@ fn compact_cell(
     .expect("create cell")
 }
 
-/// Horizontal row of compact day-cells. `today` is used to derive the
-/// 3-letter weekday for each cell — index 0 of `days` is treated as
-/// `today + 1 day`, index 1 as `today + 2 days`, and so on.
+/// Horizontal row of compact day-cells. `first_date` is the date for
+/// the first cell — `one-plus-four` passes `today + 1 day`; `five`
+/// passes `today` itself.
 fn compact_cell_row(
     tree: &mut TaffyTree<Drawable>,
-    today: DateTime<Tz>,
+    style: &CellStyle,
+    first_date: DateTime<Tz>,
     days: &[DailyWeather],
-    text_px: f32,
     color: crate::config::ColorConfig,
     units: Units,
 ) -> NodeId {
-    // 12 px cell-to-cell gap on E1004 (text_px=60) → 0.20 ratio.
-    let cell_gap = text_px * 0.20;
-    // PLAN spec: 16 px gap between the today line and the row on E1004.
-    // The root flex's `gap: line_gap` already adds 12 px (= text_px*0.20),
-    // so add the remaining ~4 px (≈ text_px*0.07) as a top margin here.
-    let row_extra_top = text_px * 0.07;
-
     let cells: Vec<NodeId> = days
         .iter()
         .enumerate()
         .map(|(i, w)| {
-            // `i + 1` because the first cell is "tomorrow" relative to today.
-            let date = today + chrono::Duration::days(i as i64 + 1);
+            let date = first_date + chrono::Duration::days(i as i64);
             let weekday = date.format("%a").to_string();
             compact_cell(
                 tree,
-                text_px,
+                style,
                 weekday,
                 wmo_icon(Some(w.weather_code)),
                 format!(
@@ -391,11 +430,11 @@ fn compact_cell_row(
             flex_direction: FlexDirection::Row,
             justify_content: Some(JustifyContent::Center),
             gap: Size {
-                width: length(cell_gap),
+                width: length(style.cell_gap),
                 height: length(0.0),
             },
             margin: Rect {
-                top: length(row_extra_top),
+                top: length(style.row_extra_top),
                 left: zero(),
                 right: zero(),
                 bottom: zero(),
@@ -615,6 +654,21 @@ mod tests {
         )
         .render(&mut pm);
         crate::test_snapshot::assert_matches(&pm, "infobox/one_plus_four");
+    }
+
+    #[test]
+    fn renders_five() {
+        // `five` has no special today block — all 5 days share the compact
+        // cell format. Same E1004-shaped canvas as `one_plus_four`.
+        let mut pm = canvas(1200, 1600);
+        ready_with(
+            HeaderLayout::DayDate,
+            WeatherLayout::Five,
+            sample_forecast(),
+            false,
+        )
+        .render(&mut pm);
+        crate::test_snapshot::assert_matches(&pm, "infobox/five");
     }
 
     #[test]
