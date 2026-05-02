@@ -32,30 +32,41 @@ impl Infobox {
     }
 }
 
+/// Number of days the configured `weather_layout` wants from
+/// `weather::forecast`. Returns 0 when no weather is shown — used to
+/// skip the network call entirely.
+fn forecast_days(layout: WeatherLayout) -> u32 {
+    match layout {
+        WeatherLayout::None => 0,
+        WeatherLayout::One => 1,
+        WeatherLayout::OnePlusFour | WeatherLayout::Five => 5,
+    }
+}
+
 #[async_trait]
 impl Overlay for Infobox {
     async fn preprocess(&self, ctx: &OverlayContext<'_>) -> Box<dyn ReadyOverlay + Send> {
-        // Skip the network round-trip entirely when the configured layout
-        // doesn't ask for weather.
-        let (weather, weather_failed) = if matches!(self.cfg.weather_layout, WeatherLayout::None) {
-            (None, false)
+        let days = forecast_days(self.cfg.weather_layout);
+        let (weather, weather_failed) = if days == 0 {
+            (Vec::new(), false)
         } else {
             // `ctx.now` is already in the screen's timezone (set by the request
             // handler); pull the tz name for the weather query off of it.
             let tz_name = ctx.now.timezone().name();
-            match weather::daily(
+            match weather::forecast(
                 ctx.http,
                 self.cfg.latitude,
                 self.cfg.longitude,
                 tz_name,
                 self.cfg.units,
+                days,
             )
             .await
             {
-                Ok(w) => (Some(w), false),
+                Ok(w) => (w, false),
                 Err(e) => {
                     tracing::warn!(error = %format!("{e:#}"), "weather fetch failed; infobox will show error");
-                    (None, true)
+                    (Vec::new(), true)
                 }
             }
         };
@@ -71,7 +82,10 @@ impl Overlay for Infobox {
 struct ReadyInfobox {
     cfg: InfoboxConfig,
     now: DateTime<Tz>,
-    weather: Option<DailyWeather>,
+    /// One entry per day starting from "today" (index 0). Empty when
+    /// the configured layout doesn't request weather, or when the
+    /// fetch failed.
+    weather: Vec<DailyWeather>,
     /// True iff a weather fetch was attempted *and* failed. Distinguishes
     /// "weather not requested" (no degradation) from "weather fetch
     /// failed" (degraded — retry sooner).
@@ -112,43 +126,64 @@ impl ReadyOverlay for ReadyInfobox {
             children.push(text_leaf(&mut tree, date_text, text_px, fg));
         }
 
-        // Weather panel. `OnePlusFour` and `Five` aren't implemented yet —
-        // they fall through to the same single-day line as `One` (which is
-        // also the previous behaviour, before the layout fields existed).
-        // Stage 4 steps 7–8 will replace these arms with the multi-day
-        // tree-builders.
+        // Weather panel. Today's icon+range line — used by `One` directly,
+        // and as the top of the `OnePlusFour` block.
+        let today_line = |tree: &mut TaffyTree<Drawable>| {
+            // On weather-fetch failure, keep the line shape (icon + text) but
+            // show a short status string instead of the temperature range.
+            // The full error goes to the server-side log.
+            let (icon_glyph, weather_text) = match self.weather.first() {
+                Some(w) => (
+                    wmo_icon(Some(w.weather_code)),
+                    format!(
+                        "{:.0}–{:.0}{}",
+                        w.temperature_min.round(),
+                        w.temperature_max.round(),
+                        cfg.units.temperature_suffix()
+                    ),
+                ),
+                None => (wmo_icon(None), "Weather error".to_string()),
+            };
+            tree.new_leaf_with_context(
+                Style::default(),
+                Drawable::IconText {
+                    icon: icon_glyph,
+                    icon_size: icon_px,
+                    gap: icon_gap,
+                    text: weather_text,
+                    text_size: text_px,
+                    color: fg,
+                },
+            )
+            .expect("create weather leaf")
+        };
+
         match cfg.weather_layout {
             WeatherLayout::None => (),
-            WeatherLayout::One | WeatherLayout::OnePlusFour | WeatherLayout::Five => {
-                // On weather-fetch failure, keep the line shape (icon + text)
-                // but show a short status string instead of the temperature
-                // range. The full error goes to the server-side log.
-                let (icon_glyph, weather_text) = match self.weather {
-                    Some(w) => (
-                        wmo_icon(Some(w.weather_code)),
-                        format!(
-                            "{:.0}–{:.0}{}",
-                            w.temperature_min.round(),
-                            w.temperature_max.round(),
-                            cfg.units.temperature_suffix()
-                        ),
-                    ),
-                    None => (wmo_icon(None), "Weather error".to_string()),
-                };
-                children.push(
-                    tree.new_leaf_with_context(
-                        Style::default(),
-                        Drawable::IconText {
-                            icon: icon_glyph,
-                            icon_size: icon_px,
-                            gap: icon_gap,
-                            text: weather_text,
-                            text_size: text_px,
-                            color: fg,
-                        },
-                    )
-                    .expect("create weather leaf"),
-                );
+            WeatherLayout::One => {
+                children.push(today_line(&mut tree));
+            }
+            WeatherLayout::OnePlusFour => {
+                children.push(today_line(&mut tree));
+                // Future-day cells row. Skipped silently if the fetch returned
+                // fewer than the expected 5 days (shouldn't happen in practice
+                // — Open-Meteo always returns the full requested range — but
+                // we don't want to crash the render if it does).
+                if self.weather.len() >= 2 {
+                    let row = compact_cell_row(
+                        &mut tree,
+                        self.now,
+                        &self.weather[1..],
+                        text_px,
+                        fg,
+                        cfg.units,
+                    );
+                    children.push(row);
+                }
+            }
+            // `Five` lands in the next commit.
+            WeatherLayout::Five => {
+                children.push(today_line(&mut tree));
             }
         }
 
@@ -233,6 +268,145 @@ fn text_leaf(
     .expect("create text leaf")
 }
 
+/// Build one compact day-cell — vertical stack of weekday letter,
+/// weather icon, max temperature, min temperature. Sizes are
+/// expressed as ratios of the screen-derived `text_px` so the cell
+/// scales with the display.
+fn compact_cell(
+    tree: &mut TaffyTree<Drawable>,
+    text_px: f32,
+    weekday: String,
+    icon_glyph: char,
+    max_temp: String,
+    min_temp: String,
+    color: crate::config::ColorConfig,
+) -> NodeId {
+    // PLAN spec for E1004 (`text_px=60`): weekday 44, icon 56, temps 32,
+    // gaps 8/6/4. Expressed here as ratios of `text_px` so smaller
+    // displays scale down proportionally.
+    let weekday_size = text_px * 0.73;
+    let icon_size = text_px * 0.93;
+    let temp_size = text_px * 0.53;
+    let gap_after_weekday = text_px * 0.13;
+    let gap_after_icon = text_px * 0.10;
+    let gap_after_max = text_px * 0.07;
+
+    let weekday_node = text_leaf(tree, weekday, weekday_size, color);
+    let icon_node = tree
+        .new_leaf_with_context(
+            Style::default(),
+            Drawable::Icon {
+                glyph: icon_glyph,
+                size: icon_size,
+                color,
+            },
+        )
+        .expect("create icon leaf");
+    let max_node = text_leaf(tree, max_temp, temp_size, color);
+    let min_node = text_leaf(tree, min_temp, temp_size, color);
+
+    // Centre each row inside the cell so weekdays/temps of different
+    // widths don't shift left.
+    let mut centre = |node: NodeId, top_margin: f32| {
+        tree.set_style(
+            node,
+            Style {
+                margin: Rect {
+                    top: length(top_margin),
+                    left: zero(),
+                    right: zero(),
+                    bottom: zero(),
+                },
+                align_self: Some(AlignItems::Center),
+                ..Default::default()
+            },
+        )
+        .expect("set cell-child style");
+    };
+    centre(weekday_node, 0.0);
+    centre(icon_node, gap_after_weekday);
+    centre(max_node, gap_after_icon);
+    centre(min_node, gap_after_max);
+
+    tree.new_with_children(
+        Style {
+            display: Display::Flex,
+            flex_direction: FlexDirection::Column,
+            align_items: Some(AlignItems::Center),
+            ..Default::default()
+        },
+        &[weekday_node, icon_node, max_node, min_node],
+    )
+    .expect("create cell")
+}
+
+/// Horizontal row of compact day-cells. `today` is used to derive the
+/// 3-letter weekday for each cell — index 0 of `days` is treated as
+/// `today + 1 day`, index 1 as `today + 2 days`, and so on.
+fn compact_cell_row(
+    tree: &mut TaffyTree<Drawable>,
+    today: DateTime<Tz>,
+    days: &[DailyWeather],
+    text_px: f32,
+    color: crate::config::ColorConfig,
+    units: Units,
+) -> NodeId {
+    // 12 px cell-to-cell gap on E1004 (text_px=60) → 0.20 ratio.
+    let cell_gap = text_px * 0.20;
+    // PLAN spec: 16 px gap between the today line and the row on E1004.
+    // The root flex's `gap: line_gap` already adds 12 px (= text_px*0.20),
+    // so add the remaining ~4 px (≈ text_px*0.07) as a top margin here.
+    let row_extra_top = text_px * 0.07;
+
+    let cells: Vec<NodeId> = days
+        .iter()
+        .enumerate()
+        .map(|(i, w)| {
+            // `i + 1` because the first cell is "tomorrow" relative to today.
+            let date = today + chrono::Duration::days(i as i64 + 1);
+            let weekday = date.format("%a").to_string();
+            compact_cell(
+                tree,
+                text_px,
+                weekday,
+                wmo_icon(Some(w.weather_code)),
+                format!(
+                    "{:.0}{}",
+                    w.temperature_max.round(),
+                    units.temperature_suffix()
+                ),
+                format!(
+                    "{:.0}{}",
+                    w.temperature_min.round(),
+                    units.temperature_suffix()
+                ),
+                color,
+            )
+        })
+        .collect();
+
+    tree.new_with_children(
+        Style {
+            display: Display::Flex,
+            flex_direction: FlexDirection::Row,
+            justify_content: Some(JustifyContent::Center),
+            gap: Size {
+                width: length(cell_gap),
+                height: length(0.0),
+            },
+            margin: Rect {
+                top: length(row_extra_top),
+                left: zero(),
+                right: zero(),
+                bottom: zero(),
+            },
+            ..Default::default()
+        },
+        &cells,
+    )
+    .expect("create cell row")
+}
+
 const MONTHS: [&str; 12] = [
     "January",
     "February",
@@ -308,7 +482,7 @@ mod tests {
     fn ready_with(
         header: HeaderLayout,
         weather_layout: WeatherLayout,
-        weather: Option<DailyWeather>,
+        weather: Vec<DailyWeather>,
         weather_failed: bool,
     ) -> ReadyInfobox {
         ReadyInfobox {
@@ -323,13 +497,32 @@ mod tests {
         }
     }
 
+    /// 5 days of sample weather: today + 4 future days. Different
+    /// codes per day so the icons in the cells are visibly different.
+    fn sample_forecast() -> Vec<DailyWeather> {
+        [
+            (8.0, 18.0, 1),   // today: partly cloudy
+            (6.0, 14.0, 3),   // wed: cloudy
+            (9.0, 19.0, 0),   // thu: sunny
+            (10.0, 16.0, 61), // fri: rain
+            (8.0, 13.0, 80),  // sat: showers
+        ]
+        .into_iter()
+        .map(|(min, max, code)| DailyWeather {
+            temperature_min: min,
+            temperature_max: max,
+            weather_code: code,
+        })
+        .collect()
+    }
+
     #[test]
     fn renders_with_weather() {
         let mut pm = canvas(800, 600);
         ready_with(
             HeaderLayout::DayDate,
             WeatherLayout::One,
-            Some(sample_weather()),
+            vec![sample_weather()],
             false,
         )
         .render(&mut pm);
@@ -339,7 +532,7 @@ mod tests {
     #[test]
     fn renders_without_weather() {
         let mut pm = canvas(800, 600);
-        let r = ready_with(HeaderLayout::DayDate, WeatherLayout::One, None, true);
+        let r = ready_with(HeaderLayout::DayDate, WeatherLayout::One, Vec::new(), true);
         assert!(r.degraded());
         r.render(&mut pm);
         crate::test_snapshot::assert_matches(&pm, "infobox/without_weather");
@@ -348,7 +541,12 @@ mod tests {
     #[test]
     fn renders_header_only() {
         let mut pm = canvas(800, 600);
-        let r = ready_with(HeaderLayout::DayDate, WeatherLayout::None, None, false);
+        let r = ready_with(
+            HeaderLayout::DayDate,
+            WeatherLayout::None,
+            Vec::new(),
+            false,
+        );
         // Weather not requested → not degraded even though `weather` is None.
         assert!(!r.degraded());
         r.render(&mut pm);
@@ -361,7 +559,7 @@ mod tests {
         let r = ready_with(
             HeaderLayout::None,
             WeatherLayout::One,
-            Some(sample_weather()),
+            vec![sample_weather()],
             false,
         );
         r.render(&mut pm);
@@ -374,7 +572,7 @@ mod tests {
         ready_with(
             HeaderLayout::Day,
             WeatherLayout::One,
-            Some(sample_weather()),
+            vec![sample_weather()],
             false,
         )
         .render(&mut pm);
@@ -387,7 +585,7 @@ mod tests {
         ready_with(
             HeaderLayout::Date,
             WeatherLayout::One,
-            Some(sample_weather()),
+            vec![sample_weather()],
             false,
         )
         .render(&mut pm);
@@ -397,10 +595,26 @@ mod tests {
     #[test]
     fn empty_layout_is_a_noop() {
         let mut pm = canvas(800, 600);
-        ready_with(HeaderLayout::None, WeatherLayout::None, None, false).render(&mut pm);
+        ready_with(HeaderLayout::None, WeatherLayout::None, Vec::new(), false).render(&mut pm);
         // Fresh Pixmap is fully transparent; render with both sections off
         // must leave it that way.
         assert!(pm.pixels().iter().all(|p| p.alpha() == 0));
+    }
+
+    #[test]
+    fn renders_one_plus_four() {
+        // The multi-day cells expect more horizontal room than 800×600 gives;
+        // use a portrait E1004-shaped canvas so the row of 4 future-day cells
+        // has somewhere to land without clipping.
+        let mut pm = canvas(1200, 1600);
+        ready_with(
+            HeaderLayout::DayDate,
+            WeatherLayout::OnePlusFour,
+            sample_forecast(),
+            false,
+        )
+        .render(&mut pm);
+        crate::test_snapshot::assert_matches(&pm, "infobox/one_plus_four");
     }
 
     #[test]

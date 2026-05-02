@@ -414,7 +414,7 @@ output is pixel-identical to the current code for the default config.
 
 # Sequencing
 
-Total: 8 commits across 4 stages, each step independently shippable.
+Total: 7 commits across 4 stages, each step independently shippable.
 Each step ends with the build green and existing tests passing.
 Behaviour changes are explicit in the step description; pure refactors
 are called out.
@@ -525,7 +525,7 @@ guarantee no pixel drift.
 `without_weather` pass without regenerating. `cargo build` and
 `cargo test` clean.
 
-## Stage 4 — Multi-day layouts (5 commits)
+## Stage 4 — Multi-day layouts (4 commits)
 
 ### Step 4 — Add layout config + wire single-day combinations
 
@@ -560,38 +560,35 @@ snapshots unchanged (default config). New snapshots for
 `date_only_header`. `empty_layout_is_a_noop` asserts the canvas
 stays transparent. `cargo test` clean.
 
-### Step 5 — Generalise weather fetch + add `compact_cell` tree-builder
+### Step 5 — Generalise weather fetch + implement `one-plus-four`
 
-**Files:** `src/weather.rs`, `src/infobox.rs` (or new helper module).
+**Files:** `src/weather.rs`, `src/overlays/infobox.rs`.
+
+The fetch generalisation, the `compact_cell` tree-builder, and the
+first layout that uses both ship together — adding a helper with no
+caller would just be scaffolding.
 
 **Changes:**
 - Rename `weather::daily()` → `weather::forecast(days)` returning
-  `Vec<DailyWeather>`. Update `Infobox::preprocess` to call with N
-  derived from `weather_layout` (1 for `One`, 5 for `OnePlusFour`
-  and `Five`).
-- Add `compact_cell(tree, weekday, icon, max, min, font_sizes) ->
-  NodeId` — a taffy tree-builder that constructs the stacked
-  `weekday / icon / max / min` block and returns the parent node.
-  No layout uses it yet.
-- Helper has its own unit test (builds the cell, computes layout,
-  asserts bounding box).
+  `Vec<DailyWeather>`. `Infobox::preprocess` calls with N derived
+  from `weather_layout` (1 for `One`, 5 for `OnePlusFour` and
+  `Five`); `WeatherLayout::None` skips the call entirely.
+- Change `ReadyInfobox::weather` from `Option<DailyWeather>` to
+  `Vec<DailyWeather>` (index 0 = today).
+- Add `compact_cell` tree-builder for one stacked
+  `weekday / icon / max / min` block; sizes expressed as ratios of
+  `text_px` per the Phase 2 spec. Add `compact_cell_row` that takes
+  the today timestamp and a slice of future days, computing each
+  cell's weekday from `today + (i + 1)` days.
+- `WeatherLayout::OnePlusFour` arm: today's icon+range line followed
+  by the 4-cell row.
 
-**Acceptance:** Existing single-day infobox behaviour unchanged
-(snapshot test still passes); helper test passes.
+**Acceptance:** Existing snapshots unchanged. New
+`infobox/one_plus_four.png` snapshot rendered against an E1004-shaped
+canvas (1200×1600) since the row needs more horizontal room than
+the 800×600 test canvas gives.
 
-### Step 6 — Implement `weather_layout = one-plus-four`
-
-**Files:** `src/infobox.rs`.
-
-**Changes:**
-- Add the today-line + 4-cell-row rendering using `compact_cell`,
-  per the Phase 2 specs.
-- Render tests for the layout (success and weather-error paths).
-
-**Acceptance:** New layout renders; tests pass; manual visual check
-on E1004 matches the mockup.
-
-### Step 7 — Implement `weather_layout = five`
+### Step 6 — Implement `weather_layout = five`
 
 **Files:** `src/infobox.rs`.
 
@@ -603,7 +600,7 @@ on E1004 matches the mockup.
 **Acceptance:** New layout renders; tests pass; manual visual check
 on E1004 matches the mockup.
 
-### Step 8 — Documentation
+### Step 7 — Documentation
 
 **Files:** `README.md`, `config.example.toml`.
 
