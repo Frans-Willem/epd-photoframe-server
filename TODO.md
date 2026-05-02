@@ -24,9 +24,6 @@ before writing this up — best-guess noted in parens.
   Open Font License 1.1 with original Bitstream Vera license terms).
 - `WeatherIcons-Regular.ttf` — Weather Icons by Erik Flowers (likely
   SIL OFL 1.1; CSS portion under MIT).
-- `HDR_L_0.png` — high-quality blue-noise texture, sourced from the
-  upstream `epd-dither` repo. Check `epd-dither`'s licensing terms
-  and propagate appropriately.
 
 Two reasonable shapes:
 - A `LICENSES/` directory with the verbatim upstream licence texts
