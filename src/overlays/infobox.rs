@@ -47,8 +47,8 @@ fn forecast_days(layout: WeatherLayout) -> u32 {
 impl Overlay for Infobox {
     async fn preprocess(&self, ctx: &OverlayContext<'_>) -> Box<dyn ReadyOverlay + Send> {
         let days = forecast_days(self.cfg.weather_layout);
-        let (weather, weather_failed) = if days == 0 {
-            (Vec::new(), false)
+        let weather = if days == 0 {
+            Vec::new()
         } else {
             // `ctx.now` is already in the screen's timezone (set by the request
             // handler); pull the tz name for the weather query off of it.
@@ -63,10 +63,10 @@ impl Overlay for Infobox {
             )
             .await
             {
-                Ok(w) => (w, false),
+                Ok(w) => w,
                 Err(e) => {
                     tracing::warn!(error = %format!("{e:#}"), "weather fetch failed; infobox will show error");
-                    (Vec::new(), true)
+                    Vec::new()
                 }
             }
         };
@@ -74,7 +74,6 @@ impl Overlay for Infobox {
             cfg: self.cfg.clone(),
             now: ctx.now,
             weather,
-            weather_failed,
         })
     }
 }
@@ -86,10 +85,6 @@ struct ReadyInfobox {
     /// the configured layout doesn't request weather, or when the
     /// fetch failed.
     weather: Vec<DailyWeather>,
-    /// True iff a weather fetch was attempted *and* failed. Distinguishes
-    /// "weather not requested" (no degradation) from "weather fetch
-    /// failed" (degraded — retry sooner).
-    weather_failed: bool,
 }
 
 impl ReadyOverlay for ReadyInfobox {
@@ -165,30 +160,28 @@ impl ReadyOverlay for ReadyInfobox {
             }
             WeatherLayout::OnePlusFour => {
                 children.push(today_line(&mut tree));
-                // Future-day cells row. Skipped silently if the fetch returned
-                // fewer than the expected 5 days (shouldn't happen in practice
-                // — Open-Meteo always returns the full requested range — but
-                // we don't want to crash the render if it does).
-                if self.weather.len() >= 2 {
-                    let style = CellStyle::one_plus_four(text_px);
-                    let row = compact_cell_row(
-                        &mut tree,
-                        &style,
-                        self.now + chrono::Duration::days(1),
-                        &self.weather[1..],
-                        fg,
-                        cfg.units,
-                    );
-                    children.push(row);
-                }
+                let style = CellStyle::one_plus_four(text_px);
+                let row = compact_cell_row(
+                    &mut tree,
+                    &style,
+                    self.now + chrono::Duration::days(1),
+                    (0..4).map(|i| self.weather.get(i + 1)),
+                    fg,
+                    cfg.units,
+                );
+                children.push(row);
             }
             WeatherLayout::Five => {
-                if !self.weather.is_empty() {
-                    let style = CellStyle::five(text_px);
-                    let row =
-                        compact_cell_row(&mut tree, &style, self.now, &self.weather, fg, cfg.units);
-                    children.push(row);
-                }
+                let style = CellStyle::five(text_px);
+                let row = compact_cell_row(
+                    &mut tree,
+                    &style,
+                    self.now,
+                    (0..5).map(|i| self.weather.get(i)),
+                    fg,
+                    cfg.units,
+                );
+                children.push(row);
             }
         }
 
@@ -252,7 +245,11 @@ impl ReadyOverlay for ReadyInfobox {
     }
 
     fn degraded(&self) -> bool {
-        self.weather_failed
+        // Catches both the "fetch failed" case (`weather` is empty) and the
+        // "fetch returned fewer days than the layout asked for" case (e.g.
+        // Open-Meteo returns 3 of 5 requested days). Layouts that don't
+        // request weather (`forecast_days == 0`) are never degraded.
+        self.weather.len() < forecast_days(self.cfg.weather_layout) as usize
     }
 }
 
@@ -389,36 +386,36 @@ fn compact_cell(
 
 /// Horizontal row of compact day-cells. `first_date` is the date for
 /// the first cell — `one-plus-four` passes `today + 1 day`; `five`
-/// passes `today` itself.
-fn compact_cell_row(
+/// passes `today` itself. `weather` is an iterator of optional per-cell
+/// data: missing entries render with a `wi-na` icon and `—` temperatures
+/// so the row's structure stays consistent regardless of fetch outcome
+/// (and tolerates Open-Meteo returning fewer or more days than asked).
+fn compact_cell_row<'a>(
     tree: &mut TaffyTree<Drawable>,
     style: &CellStyle,
     first_date: DateTime<Tz>,
-    days: &[DailyWeather],
+    weather: impl Iterator<Item = Option<&'a DailyWeather>>,
     color: crate::config::ColorConfig,
     units: Units,
 ) -> NodeId {
-    let cells: Vec<NodeId> = days
-        .iter()
+    let placeholder_temp = format!("—{}", units.temperature_suffix());
+    let cells: Vec<NodeId> = weather
         .enumerate()
         .map(|(i, w)| {
             let date = first_date + chrono::Duration::days(i as i64);
             let weekday = date.format("%a").to_string();
+            let fmt_temp = |t: f32| format!("{:.0}{}", t.round(), units.temperature_suffix());
+            let max_temp =
+                w.map_or_else(|| placeholder_temp.clone(), |w| fmt_temp(w.temperature_max));
+            let min_temp =
+                w.map_or_else(|| placeholder_temp.clone(), |w| fmt_temp(w.temperature_min));
             compact_cell(
                 tree,
                 style,
                 weekday,
-                wmo_icon(Some(w.weather_code)),
-                format!(
-                    "{:.0}{}",
-                    w.temperature_max.round(),
-                    units.temperature_suffix()
-                ),
-                format!(
-                    "{:.0}{}",
-                    w.temperature_min.round(),
-                    units.temperature_suffix()
-                ),
+                wmo_icon(w.map(|w| w.weather_code)),
+                max_temp,
+                min_temp,
                 color,
             )
         })
@@ -522,7 +519,6 @@ mod tests {
         header: HeaderLayout,
         weather_layout: WeatherLayout,
         weather: Vec<DailyWeather>,
-        weather_failed: bool,
     ) -> ReadyInfobox {
         ReadyInfobox {
             cfg: InfoboxConfig {
@@ -532,7 +528,6 @@ mod tests {
             },
             now: UTC.with_ymd_and_hms(2026, 4, 20, 12, 0, 0).unwrap(),
             weather,
-            weather_failed,
         }
     }
 
@@ -562,7 +557,6 @@ mod tests {
             HeaderLayout::DayDate,
             WeatherLayout::One,
             vec![sample_weather()],
-            false,
         )
         .render(&mut pm);
         crate::test_snapshot::assert_matches(&pm, "infobox/with_weather");
@@ -571,7 +565,7 @@ mod tests {
     #[test]
     fn renders_without_weather() {
         let mut pm = canvas(800, 600);
-        let r = ready_with(HeaderLayout::DayDate, WeatherLayout::One, Vec::new(), true);
+        let r = ready_with(HeaderLayout::DayDate, WeatherLayout::One, Vec::new());
         assert!(r.degraded());
         r.render(&mut pm);
         crate::test_snapshot::assert_matches(&pm, "infobox/without_weather");
@@ -580,12 +574,7 @@ mod tests {
     #[test]
     fn renders_header_only() {
         let mut pm = canvas(800, 600);
-        let r = ready_with(
-            HeaderLayout::DayDate,
-            WeatherLayout::None,
-            Vec::new(),
-            false,
-        );
+        let r = ready_with(HeaderLayout::DayDate, WeatherLayout::None, Vec::new());
         // Weather not requested → not degraded even though `weather` is None.
         assert!(!r.degraded());
         r.render(&mut pm);
@@ -599,7 +588,6 @@ mod tests {
             HeaderLayout::None,
             WeatherLayout::One,
             vec![sample_weather()],
-            false,
         );
         r.render(&mut pm);
         crate::test_snapshot::assert_matches(&pm, "infobox/weather_only");
@@ -612,7 +600,6 @@ mod tests {
             HeaderLayout::Day,
             WeatherLayout::One,
             vec![sample_weather()],
-            false,
         )
         .render(&mut pm);
         crate::test_snapshot::assert_matches(&pm, "infobox/day_only_header");
@@ -625,7 +612,6 @@ mod tests {
             HeaderLayout::Date,
             WeatherLayout::One,
             vec![sample_weather()],
-            false,
         )
         .render(&mut pm);
         crate::test_snapshot::assert_matches(&pm, "infobox/date_only_header");
@@ -634,7 +620,7 @@ mod tests {
     #[test]
     fn empty_layout_is_a_noop() {
         let mut pm = canvas(800, 600);
-        ready_with(HeaderLayout::None, WeatherLayout::None, Vec::new(), false).render(&mut pm);
+        ready_with(HeaderLayout::None, WeatherLayout::None, Vec::new()).render(&mut pm);
         // Fresh Pixmap is fully transparent; render with both sections off
         // must leave it that way.
         assert!(pm.pixels().iter().all(|p| p.alpha() == 0));
@@ -650,7 +636,6 @@ mod tests {
             HeaderLayout::DayDate,
             WeatherLayout::OnePlusFour,
             sample_forecast(),
-            false,
         )
         .render(&mut pm);
         crate::test_snapshot::assert_matches(&pm, "infobox/one_plus_four");
@@ -665,10 +650,26 @@ mod tests {
             HeaderLayout::DayDate,
             WeatherLayout::Five,
             sample_forecast(),
-            false,
         )
         .render(&mut pm);
         crate::test_snapshot::assert_matches(&pm, "infobox/five");
+    }
+
+    #[test]
+    fn renders_one_plus_four_on_failed_fetch() {
+        // Empty `weather` Vec simulates a fetch failure (or `weather_layout`
+        // wanting more days than the API returned). The today line shows
+        // "Weather error" and the 4 future cells render with `wi-na` icons
+        // and `—` placeholder temperatures — structural shape preserved.
+        let mut pm = canvas(1200, 1600);
+        let r = ready_with(
+            HeaderLayout::DayDate,
+            WeatherLayout::OnePlusFour,
+            Vec::new(),
+        );
+        assert!(r.degraded());
+        r.render(&mut pm);
+        crate::test_snapshot::assert_matches(&pm, "infobox/one_plus_four_failed");
     }
 
     #[test]
