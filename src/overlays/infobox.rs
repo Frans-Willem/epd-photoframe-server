@@ -1,9 +1,9 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Datelike};
 use chrono_tz::Tz;
-use icu::calendar::{Date, Iso};
-use icu::datetime::DateTimeFormatter;
-use icu::datetime::fieldsets::E;
+use icu_calendar::{Date, Iso};
+use icu_datetime::DateTimeFormatter;
+use icu_datetime::fieldsets::E;
 use taffy::prelude::*;
 use tiny_skia::Pixmap;
 

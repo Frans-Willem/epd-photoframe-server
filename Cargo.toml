@@ -23,7 +23,15 @@ rand = "0.9"
 ab_glyph = "0.2"
 chrono = "0.4"
 chrono-tz = "0.10"
-icu = { version = "2", features = ["sync"] }
+# `compiled_data` bakes the CLDR tables into the binary (no separate data file
+# to ship). Skipping the default `ixdtf` feature: we construct calendar dates
+# from chrono fields, not by parsing ISO 8601 strings.
+icu_calendar = { version = "2", default-features = false, features = ["compiled_data"] }
+icu_datetime = { version = "2", default-features = false, features = ["compiled_data"] }
+icu_locale_core = "2"
+# `sync` lets icu's data-payload Yokes hold Arc instead of Rc, so the formatters
+# in `LocaleFormatters` are `Send + Sync` (required by axum's shared state).
+icu_provider = { version = "2", features = ["sync"] }
 iana-time-zone = "0.1"
 cron = "0.16.0"
 cron-lingo = "0.4.2"

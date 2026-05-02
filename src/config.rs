@@ -1,8 +1,8 @@
 use chrono::Duration;
 use chrono_tz::Tz;
-use icu::datetime::DateTimeFormatter;
-use icu::datetime::fieldsets::{E, YMD};
-use icu::locale::Locale;
+use icu_datetime::DateTimeFormatter;
+use icu_datetime::fieldsets::{E, YMD};
+use icu_locale_core::Locale;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::net::SocketAddr;
