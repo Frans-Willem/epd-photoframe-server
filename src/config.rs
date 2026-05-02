@@ -512,246 +512,54 @@ pub enum BatteryStyle {
 
 // ----- Dither ---------------------------------------------------------------
 
-#[derive(Debug, Clone, Default)]
-pub enum NoiseSource {
-    None,
-    Bayer(Option<usize>),
-    #[default]
-    InterleavedGradient,
-    White,
-    /// Pre-computed 256x256 high-quality blue-noise texture (HDR_L_0.png),
-    /// tiled by simple modulo over the image. Embedded into the binary at
-    /// build time.
-    Blue,
+// Dither configuration uses upstream `epd-dither` enums directly. Their
+// `FromStr` impls accept exactly the spellings we care about (the binary's
+// CLI took the same strings), so we forward TOML strings through the same
+// parser. Re-exported under unchanged names (`Strategy` etc.) so call
+// sites elsewhere need no rename.
+pub use epd_dither::dither::DecomposeStrategy as Strategy;
+pub use epd_dither::dither::diffusion_matrix::DiffuseMethod;
+pub use epd_dither::noise::NoiseSource;
+pub use epd_dither::palette::Palette;
+
+/// `serde` adapter: deserialize any `T: FromStr` from a string field.
+fn deserialize_via_fromstr<'de, T, D>(d: D) -> Result<T, D::Error>
+where
+    T: FromStr,
+    T::Err: std::fmt::Display,
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(d)?;
+    s.parse().map_err(serde::de::Error::custom)
 }
 
-impl FromStr for NoiseSource {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "none" => Ok(Self::None),
-            "bayer" => Ok(Self::Bayer(None)),
-            "ign" | "interleaved-gradient-noise" => Ok(Self::InterleavedGradient),
-            "white" => Ok(Self::White),
-            "blue" => Ok(Self::Blue),
-            _ if s.starts_with("bayer:") => {
-                let n = s["bayer:".len()..]
-                    .parse::<usize>()
-                    .map_err(|_| format!("invalid bayer depth in `{s}`"))?;
-                Ok(Self::Bayer(Some(n)))
-            }
-            _ => Err(format!("unknown noise source `{s}`")),
-        }
+/// `serde` adapter: deserialize `Option<T: FromStr>` (used for the two
+/// palette fields, which fall back to a strategy-driven default when
+/// absent rather than to `T::default()`).
+fn deserialize_opt_via_fromstr<'de, T, D>(d: D) -> Result<Option<T>, D::Error>
+where
+    T: FromStr,
+    T::Err: std::fmt::Display,
+    D: serde::Deserializer<'de>,
+{
+    match Option::<String>::deserialize(d)? {
+        None => Ok(None),
+        Some(s) => s.parse().map(Some).map_err(serde::de::Error::custom),
     }
 }
 
-impl<'de> Deserialize<'de> for NoiseSource {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let s = String::deserialize(d)?;
-        s.parse().map_err(serde::de::Error::custom)
-    }
+fn default_noise() -> NoiseSource {
+    NoiseSource::InterleavedGradient
 }
 
-#[derive(Debug, Clone, Default)]
-pub enum Strategy {
-    #[default]
-    OctahedronClosest,
-    OctahedronFurthest,
-    /// Project onto a single fixed axis of the octahedron (0..=2), parsed
-    /// from `"octahedron-axis:<n>"`. Useful as a sanity check or to nudge
-    /// the dither toward a particular axis pair.
-    OctahedronAxis(usize),
-    /// Average the projection over all three axes. Parsed from
-    /// `"octahedron-average"`.
-    OctahedronAverage,
-    NaiveMix,
-    NaiveDominant,
-    /// Blend over all containing tetrahedra with weights
-    /// `α_i ∝ (∏_j w_{i,j})^p`. `p = 0` averages equally; higher `p`
-    /// concentrates on the most-interior tetrahedron. Parsed from
-    /// `"naive-tetra-blend:<p>"`.
-    NaiveTetraBlend(u32),
-    /// 1-D grayscale via `PureSpreadGrayDecomposer`, parsed from
-    /// `"gray-pure-spread:<r>"` with `r` in `[0, 1]`. Requires a grayscale
-    /// `dither_palette`.
-    GrayPureSpread(f32),
-    /// 1-D grayscale via `OffsetBlendGrayDecomposer`, parsed from
-    /// `"gray-offset-blend:<r>"` with `r` in `[0, 1]`. The bare TOML string
-    /// `"grayscale"` is shorthand for `GrayOffsetBlend(0.0)` — both
-    /// decomposers produce identical output at parameter = 0 (plain bracket
-    /// decomposition), but OffsetBlend takes its early-out path while
-    /// PureSpread still runs the full asymmetric-spread arithmetic.
-    GrayOffsetBlend(f32),
+fn default_strategy() -> Strategy {
+    Strategy::Octahedron(
+        epd_dither::decompose::octahedron::OctahedronDecomposerAxisStrategy::Closest,
+    )
 }
 
-impl FromStr for Strategy {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        for (prefix, ctor) in [
-            ("gray-pure-spread:", Self::GrayPureSpread as fn(f32) -> Self),
-            (
-                "gray-offset-blend:",
-                Self::GrayOffsetBlend as fn(f32) -> Self,
-            ),
-        ] {
-            if let Some(rest) = s.strip_prefix(prefix) {
-                let r: f32 = rest
-                    .parse()
-                    .map_err(|_| format!("invalid ratio in `{s}`"))?;
-                if !(0.0..=1.0).contains(&r) {
-                    return Err(format!("ratio {r} in `{s}` out of range [0.0, 1.0]"));
-                }
-                return Ok(ctor(r));
-            }
-        }
-        if let Some(rest) = s.strip_prefix("octahedron-axis:") {
-            let axis: usize = rest.parse().map_err(|_| format!("invalid axis in `{s}`"))?;
-            if axis > 2 {
-                return Err(format!("axis {axis} in `{s}` out of range [0, 2]"));
-            }
-            return Ok(Self::OctahedronAxis(axis));
-        }
-        if let Some(rest) = s.strip_prefix("naive-tetra-blend:") {
-            let p: u32 = rest
-                .parse()
-                .map_err(|_| format!("invalid exponent in `{s}`"))?;
-            return Ok(Self::NaiveTetraBlend(p));
-        }
-        match s {
-            "octahedron-closest" => Ok(Self::OctahedronClosest),
-            "octahedron-furthest" => Ok(Self::OctahedronFurthest),
-            "octahedron-average" => Ok(Self::OctahedronAverage),
-            "naive-mix" => Ok(Self::NaiveMix),
-            "naive-dominant" => Ok(Self::NaiveDominant),
-            "grayscale" => Ok(Self::GrayOffsetBlend(0.0)),
-            _ => Err(format!("unknown strategy `{s}`")),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for Strategy {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let s = String::deserialize(d)?;
-        s.parse().map_err(serde::de::Error::custom)
-    }
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum DiffuseMethod {
-    None,
-    #[default]
-    FloydSteinberg,
-    JarvisJudiceAndNinke,
-    Atkinson,
-    Sierra,
-}
-
-impl DiffuseMethod {
-    pub fn to_boxed_matrix(
-        &self,
-    ) -> Box<dyn epd_dither::dither::diffusion_matrix::DiffusionMatrix + Send + Sync> {
-        match self {
-            Self::None => Box::new(epd_dither::dither::diffusion_matrix::NoDiffuse),
-            Self::FloydSteinberg => Box::new(epd_dither::dither::diffusion_matrix::FloydSteinberg),
-            Self::JarvisJudiceAndNinke => {
-                Box::new(epd_dither::dither::diffusion_matrix::JarvisJudiceAndNinke)
-            }
-            Self::Atkinson => Box::new(epd_dither::dither::diffusion_matrix::Atkinson),
-            Self::Sierra => Box::new(epd_dither::dither::diffusion_matrix::Sierra),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Palette {
-    Naive,
-    /// Default Spectra 6 palette; aliases `spectra6-d65-bpc80-adjusted`
-    /// (lightness range closest to the legacy phone-camera placeholder).
-    #[default]
-    Spectra6,
-    Epdoptimize,
-    /// Measured Spectra 6 under D50, absolute (no BPC). Panel-realistic but
-    /// narrow lightness range.
-    #[serde(rename = "spectra6-d50")]
-    Spectra6D50,
-    /// D50, BPC at α_max + L*-symmetric scaling. Lossless (no clipping).
-    #[serde(rename = "spectra6-d50-adjusted")]
-    Spectra6D50Adjusted,
-    #[serde(rename = "spectra6-d50-bpc50-adjusted")]
-    Spectra6D50Bpc50Adjusted,
-    #[serde(rename = "spectra6-d50-bpc75-adjusted")]
-    Spectra6D50Bpc75Adjusted,
-    #[serde(rename = "spectra6-d50-bpc80-adjusted")]
-    Spectra6D50Bpc80Adjusted,
-    #[serde(rename = "spectra6-d50-bpc90-adjusted")]
-    Spectra6D50Bpc90Adjusted,
-    /// D50, full BPC (α=1.00). Panel-black → (0,0,0).
-    #[serde(rename = "spectra6-d50-bpc100-adjusted")]
-    Spectra6D50Bpc100Adjusted,
-    /// Measured Spectra 6 under D65, absolute (no BPC).
-    #[serde(rename = "spectra6-d65")]
-    Spectra6D65,
-    /// D65, BPC at α_max + L*-symmetric scaling. Lossless (no clipping).
-    #[serde(rename = "spectra6-d65-adjusted")]
-    Spectra6D65Adjusted,
-    #[serde(rename = "spectra6-d65-bpc50-adjusted")]
-    Spectra6D65Bpc50Adjusted,
-    #[serde(rename = "spectra6-d65-bpc75-adjusted")]
-    Spectra6D65Bpc75Adjusted,
-    #[serde(rename = "spectra6-d65-bpc80-adjusted")]
-    Spectra6D65Bpc80Adjusted,
-    #[serde(rename = "spectra6-d65-bpc90-adjusted")]
-    Spectra6D65Bpc90Adjusted,
-    /// D65, full BPC (α=1.00). Panel-black → (0,0,0).
-    #[serde(rename = "spectra6-d65-bpc100-adjusted")]
-    Spectra6D65Bpc100Adjusted,
-    /// 2-level linearly-spaced grayscale (black/white). Pair with a `gray*`
-    /// strategy.
-    Grayscale2,
-    /// 4-level linearly-spaced grayscale.
-    Grayscale4,
-    /// 16-level linearly-spaced grayscale.
-    Grayscale16,
-}
-
-impl Palette {
-    pub fn colors(&self) -> Vec<image::Rgb<u8>> {
-        use epd_dither::spectra6;
-        match self {
-            Self::Naive => rgb_triples(&epd_dither::decompose::octahedron::NAIVE_RGB6),
-            Self::Spectra6 => rgb_triples(&spectra6::SPECTRA6),
-            Self::Epdoptimize => rgb_triples(&epd_dither::decompose::naive::EPDOPTIMIZE),
-            Self::Spectra6D50 => rgb_triples(&spectra6::SPECTRA6_D50),
-            Self::Spectra6D50Adjusted => rgb_triples(&spectra6::SPECTRA6_D50_ADJUSTED),
-            Self::Spectra6D50Bpc50Adjusted => rgb_triples(&spectra6::SPECTRA6_D50_BPC50_ADJUSTED),
-            Self::Spectra6D50Bpc75Adjusted => rgb_triples(&spectra6::SPECTRA6_D50_BPC75_ADJUSTED),
-            Self::Spectra6D50Bpc80Adjusted => rgb_triples(&spectra6::SPECTRA6_D50_BPC80_ADJUSTED),
-            Self::Spectra6D50Bpc90Adjusted => rgb_triples(&spectra6::SPECTRA6_D50_BPC90_ADJUSTED),
-            Self::Spectra6D50Bpc100Adjusted => rgb_triples(&spectra6::SPECTRA6_D50_BPC100_ADJUSTED),
-            Self::Spectra6D65 => rgb_triples(&spectra6::SPECTRA6_D65),
-            Self::Spectra6D65Adjusted => rgb_triples(&spectra6::SPECTRA6_D65_ADJUSTED),
-            Self::Spectra6D65Bpc50Adjusted => rgb_triples(&spectra6::SPECTRA6_D65_BPC50_ADJUSTED),
-            Self::Spectra6D65Bpc75Adjusted => rgb_triples(&spectra6::SPECTRA6_D65_BPC75_ADJUSTED),
-            Self::Spectra6D65Bpc80Adjusted => rgb_triples(&spectra6::SPECTRA6_D65_BPC80_ADJUSTED),
-            Self::Spectra6D65Bpc90Adjusted => rgb_triples(&spectra6::SPECTRA6_D65_BPC90_ADJUSTED),
-            Self::Spectra6D65Bpc100Adjusted => rgb_triples(&spectra6::SPECTRA6_D65_BPC100_ADJUSTED),
-            Self::Grayscale2 => gray_triples(&epd_dither::decompose::gray::GRAYSCALE2),
-            Self::Grayscale4 => gray_triples(&epd_dither::decompose::gray::GRAYSCALE4),
-            Self::Grayscale16 => gray_triples(&epd_dither::decompose::gray::GRAYSCALE16),
-        }
-    }
-}
-
-fn rgb_triples(raw: &[[u8; 3]]) -> Vec<image::Rgb<u8>> {
-    raw.iter().copied().map(image::Rgb).collect()
-}
-
-fn gray_triples(levels: &[u8]) -> Vec<image::Rgb<u8>> {
-    levels.iter().map(|&v| image::Rgb([v, v, v])).collect()
+fn default_diffuse() -> DiffuseMethod {
+    DiffuseMethod::FloydSteinberg
 }
 
 #[derive(Debug, Clone)]
@@ -766,7 +574,7 @@ pub struct DitherConfig {
 /// Strategy-driven default palette: grayscale strategies pick `grayscale4`,
 /// colour strategies pick `spectra6`. Used when neither `dither_palette` nor
 /// `output_palette` is specified in TOML.
-fn default_palette_for(strategy: &Strategy) -> Palette {
+fn default_palette_for(strategy: Strategy) -> Palette {
     match strategy {
         Strategy::GrayPureSpread(_) | Strategy::GrayOffsetBlend(_) => Palette::Grayscale4,
         _ => Palette::Spectra6,
@@ -775,13 +583,13 @@ fn default_palette_for(strategy: &Strategy) -> Palette {
 
 impl Default for DitherConfig {
     fn default() -> Self {
-        let strategy = Strategy::default();
-        let palette = default_palette_for(&strategy);
+        let strategy = default_strategy();
+        let palette = default_palette_for(strategy);
         Self {
-            noise: Default::default(),
+            noise: default_noise(),
             strategy,
-            diffuse: Default::default(),
-            dither_palette: palette.clone(),
+            diffuse: default_diffuse(),
+            dither_palette: palette,
             output_palette: palette,
         }
     }
@@ -792,13 +600,24 @@ impl<'de> Deserialize<'de> for DitherConfig {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Raw {
-            #[serde(default)]
+            #[serde(
+                default = "default_noise",
+                deserialize_with = "deserialize_via_fromstr"
+            )]
             noise: NoiseSource,
-            #[serde(default)]
+            #[serde(
+                default = "default_strategy",
+                deserialize_with = "deserialize_via_fromstr"
+            )]
             strategy: Strategy,
-            #[serde(default)]
+            #[serde(
+                default = "default_diffuse",
+                deserialize_with = "deserialize_via_fromstr"
+            )]
             diffuse: DiffuseMethod,
+            #[serde(default, deserialize_with = "deserialize_opt_via_fromstr")]
             dither_palette: Option<Palette>,
+            #[serde(default, deserialize_with = "deserialize_opt_via_fromstr")]
             output_palette: Option<Palette>,
         }
         let raw = Raw::deserialize(d)?;
@@ -808,11 +627,11 @@ impl<'de> Deserialize<'de> for DitherConfig {
         // gray), so a `strategy = "grayscale"` line "just works".
         let (dither_palette, output_palette) = match (raw.dither_palette, raw.output_palette) {
             (Some(d), Some(o)) => (d, o),
-            (Some(d), None) => (d.clone(), d),
-            (None, Some(o)) => (o.clone(), o),
+            (Some(d), None) => (d, d),
+            (None, Some(o)) => (o, o),
             (None, None) => {
-                let p = default_palette_for(&raw.strategy);
-                (p.clone(), p)
+                let p = default_palette_for(raw.strategy);
+                (p, p)
             }
         };
         Ok(Self {
@@ -921,11 +740,18 @@ mod tests {
 
     #[test]
     fn strategy_parses_unit_variants() {
+        use epd_dither::decompose::naive::NaiveDecomposerStrategy;
+        use epd_dither::decompose::octahedron::OctahedronDecomposerAxisStrategy;
         assert!(matches!(
             "octahedron-closest".parse(),
-            Ok(Strategy::OctahedronClosest)
+            Ok(Strategy::Octahedron(
+                OctahedronDecomposerAxisStrategy::Closest
+            ))
         ));
-        assert!(matches!("naive-mix".parse(), Ok(Strategy::NaiveMix)));
+        assert!(matches!(
+            "naive-mix".parse(),
+            Ok(Strategy::Naive(NaiveDecomposerStrategy::FavorMix))
+        ));
     }
 
     #[test]
@@ -1027,14 +853,14 @@ mod tests {
             Palette::Spectra6D65Bpc100Adjusted
         ));
         // Full BPC pins panel-black to (0,0,0).
-        assert_eq!(cfg.dither_palette.colors()[0], image::Rgb([0, 0, 0]));
+        assert_eq!(cfg.dither_palette.as_rgb_slice()[0], [0, 0, 0]);
     }
 
     #[test]
     fn spectra6_alias_matches_d65_bpc80() {
         assert_eq!(
-            Palette::Spectra6.colors(),
-            Palette::Spectra6D65Bpc80Adjusted.colors()
+            Palette::Spectra6.as_rgb_slice(),
+            Palette::Spectra6D65Bpc80Adjusted.as_rgb_slice()
         );
     }
 }

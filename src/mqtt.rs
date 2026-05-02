@@ -10,7 +10,6 @@ use rumqttc::{AsyncClient, MqttOptions, QoS};
 use crate::PowerState;
 use crate::config::{MqttConfig, Publish, ScreenConfig};
 
-#[derive(Clone)]
 pub struct Publisher {
     client: AsyncClient,
     state_prefix: String,
