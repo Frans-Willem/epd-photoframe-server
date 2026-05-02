@@ -141,9 +141,9 @@ diffuse = "floyd-steinberg"     # none | floyd-steinberg | jarvis-judice-and-nin
 # Palettes. `dither_palette` is what the dither targets; `output_palette` is
 # what gets written into the PNG palette table. Naming one mirrors it to the
 # other; naming neither falls back to `spectra6` for colour strategies and
-# `grayscale4` for `grayscale` / `gray-*:*`. Set both explicitly
-# only when they should differ — see the bedroom screen below for the
-# epdoptimize-to-spectra6 case.
+# `grayscale4` for `grayscale` / `gray-*:*`. Set both explicitly only when
+# they should differ — e.g. dithering against `epdoptimize`'s wider gamut
+# while declaring the PNG palette as the panel's actual `spectra6` colours.
 #   naive | spectra6 | epdoptimize | grayscale2 | grayscale4 | grayscale16
 # Measured Spectra 6 variants from the upstream calibration session, keyed
 # by illuminant (D50 / D65) and BPC strength. `spectra6` is an alias for
@@ -172,5 +172,4 @@ rotate.natural = "at 6 AM and 6 PM"
 noise = "bayer:4"
 strategy = "octahedron-furthest"
 diffuse = "atkinson"
-dither_palette = "epdoptimize"
-output_palette = "spectra6"
+dither_palette = "spectra6-d65-bpc100-adjusted"

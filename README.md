@@ -16,16 +16,19 @@ and battery indicator.
 
 ![Living room — 1200×1600 portrait, Spectra 6](examples/living-room.png)
 
-*1200×1600 portrait, Spectra 6 (E1004). Info overlay bottom-left,
+*1200×1600 portrait, Spectra 6 (E1004) — `naive-dominant` decomposition,
+Floyd–Steinberg diffusion, blue noise. Info overlay bottom-left,
 battery indicator top-right.*
 
 ![E1002 landscape — 800×480, Spectra 6](examples/e1002-landscape.png)
 
-*800×480 landscape, Spectra 6 (E1002).*
+*800×480 landscape, Spectra 6 (E1002) — `octahedron-furthest`
+decomposition, Floyd–Steinberg diffusion, blue noise.*
 
 ![E1001 landscape — 800×480, grayscale](examples/e1001-landscape.png)
 
-*800×480 landscape, 4-level grayscale (E1001).*
+*800×480 landscape, 4-level grayscale (E1001) — `gray-offset-blend:0.33`
+decomposition, Floyd–Steinberg diffusion, blue noise.*
 
 ## How it fits together
 
