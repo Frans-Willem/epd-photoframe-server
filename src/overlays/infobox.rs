@@ -425,7 +425,6 @@ fn compact_cell_row<'a>(
         Style {
             display: Display::Flex,
             flex_direction: FlexDirection::Row,
-            justify_content: Some(JustifyContent::Center),
             gap: Size {
                 width: length(style.cell_gap),
                 height: length(0.0),
