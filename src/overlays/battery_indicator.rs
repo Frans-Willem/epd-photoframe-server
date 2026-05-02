@@ -15,16 +15,17 @@
 use std::sync::LazyLock;
 
 use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
-use image::RgbImage;
+use async_trait::async_trait;
+use taffy::prelude::*;
 use tiny_skia::{FillRule, Mask, Paint, Path, PathBuilder, Pixmap, Rect, Shader, Transform};
 
+use super::drawable::{self, Drawable, paint};
+use super::{Overlay, OverlayContext, ReadyOverlay};
 use crate::config::{BatteryIndicatorConfig, BatteryStyle, ColorConfig};
-use crate::overlay::{
-    asymmetric_rounded_rect_path, draw_line, line_width, pixmap_to_rgb, place, rgb_to_pixmap,
-};
+use crate::draw::{asymmetric_rounded_rect_path, draw_line, text_width};
 
 static TEXT_FONT: LazyLock<FontRef<'static>> = LazyLock::new(|| {
-    FontRef::try_from_slice(include_bytes!("../assets/LiberationSans-Bold.ttf"))
+    FontRef::try_from_slice(include_bytes!("../../assets/LiberationSans-Bold.ttf"))
         .expect("bundled text font is invalid")
 });
 
@@ -56,8 +57,133 @@ const TEXT_CANVAS_H: f32 = 10.0;
 const TEXT_SIZE: f32 = 11.5;
 const TEXT_VERTICAL_NUDGE: f32 = 2.5;
 
-pub fn apply(img: &mut RgbImage, cfg: &BatteryIndicatorConfig, pct: u8) {
-    render(img, cfg, pct.min(100));
+/// Battery indicator overlay. Captures its config at construction; per
+/// request it just snapshots the latest reported `battery_pct` from
+/// the sensor state.
+pub struct BatteryIndicator {
+    cfg: BatteryIndicatorConfig,
+}
+
+impl BatteryIndicator {
+    pub fn new(cfg: BatteryIndicatorConfig) -> Self {
+        Self { cfg }
+    }
+}
+
+#[async_trait]
+impl Overlay for BatteryIndicator {
+    async fn preprocess(&self, ctx: &OverlayContext<'_>) -> Box<dyn ReadyOverlay + Send> {
+        Box::new(ReadyBatteryIndicator {
+            cfg: self.cfg.clone(),
+            pct: ctx.sensors.battery_pct,
+        })
+    }
+}
+
+/// Render-side snapshot. `pct = None` means the device didn't report a
+/// battery reading on this request — render is a no-op.
+struct ReadyBatteryIndicator {
+    cfg: BatteryIndicatorConfig,
+    pct: Option<u8>,
+}
+
+impl ReadyOverlay for ReadyBatteryIndicator {
+    fn render(&self, canvas: &mut Pixmap) {
+        let Some(pct) = self.pct else { return };
+        let pct = pct.min(100);
+        let cfg = &self.cfg;
+
+        let scr_min = canvas.width().min(canvas.height()) as f32;
+        let outer_text_px = (scr_min * 0.035).max(12.0);
+        let edge = (scr_min * 0.03).round() as u32;
+        let scale = (outer_text_px * 1.4) / VIEWPORT_H;
+
+        // Same shape as the infobox: a viewport flex with the indicator
+        // as a single content-sized leaf, anchored via `cfg.position`.
+        // The leaf carries a `BatteryDrawable` context whose `measure`
+        // returns the icon-or-text size and whose `draw` paints the
+        // silhouette, level fill, and text.
+        let mut tree: TaffyTree<BatteryDrawable> = TaffyTree::new();
+        let icon = tree
+            .new_leaf_with_context(
+                Style::default(),
+                BatteryDrawable {
+                    cfg: cfg.clone(),
+                    pct,
+                    scale,
+                    outer_text_px,
+                },
+            )
+            .expect("create battery leaf");
+        let viewport = drawable::viewport(&mut tree, cfg.position, edge as f32, &[icon]);
+        paint(&mut tree, viewport, canvas);
+    }
+}
+
+/// The battery-specific drawable: knows its own size (via [`measure`])
+/// and how to paint the silhouette, level fill, and (optional)
+/// percentage text at the top-left assigned by taffy.
+///
+/// [`measure`]: Drawable::measure
+struct BatteryDrawable {
+    cfg: BatteryIndicatorConfig,
+    pct: u8,
+    scale: f32,
+    outer_text_px: f32,
+}
+
+impl Drawable for BatteryDrawable {
+    fn measure(&self) -> Size<f32> {
+        match self.cfg.style {
+            BatteryStyle::Icon | BatteryStyle::Both => Size {
+                width: VIEWPORT_W * self.scale,
+                height: VIEWPORT_H * self.scale,
+            },
+            BatteryStyle::Text => {
+                let font: &FontRef<'static> = &TEXT_FONT;
+                let text = format!("{}%", self.pct);
+                let s = PxScale::from(self.outer_text_px);
+                Size {
+                    width: text_width(font, s, &text),
+                    height: font.as_scaled(s).height(),
+                }
+            }
+        }
+    }
+
+    fn draw(&self, canvas: &mut Pixmap, x: f32, y: f32, _w: f32, _h: f32) {
+        let font: &FontRef<'static> = &TEXT_FONT;
+        let layout = Layout {
+            ox: x,
+            oy: y,
+            scale: self.scale,
+        };
+        let fg = effective_fg(&self.cfg, self.pct);
+        match self.cfg.style {
+            BatteryStyle::Icon => {
+                draw_silhouette(canvas, &layout, self.pct, fg, self.cfg.empty_color);
+            }
+            BatteryStyle::Text => {
+                let text = format!("{}%", self.pct);
+                let s = PxScale::from(self.outer_text_px);
+                let baseline = layout.oy + font.as_scaled(s).ascent();
+                draw_line(
+                    canvas,
+                    font,
+                    s,
+                    layout.ox,
+                    baseline,
+                    &text,
+                    fg.to_tiny_skia(),
+                    None,
+                );
+            }
+            BatteryStyle::Both => {
+                draw_silhouette(canvas, &layout, self.pct, fg, self.cfg.empty_color);
+                draw_inverted_text(canvas, font, &layout, self.pct, fg, self.cfg.empty_color);
+            }
+        }
+    }
 }
 
 /// Pixel-space layout of the icon. `ox`/`oy` are the top-left of the
@@ -129,69 +255,6 @@ fn solid_paint(c: ColorConfig) -> Paint<'static> {
     }
 }
 
-fn render(img: &mut RgbImage, cfg: &BatteryIndicatorConfig, pct: u8) {
-    let scr_min = img.width().min(img.height()) as f32;
-    let outer_text_px = (scr_min * 0.035).max(12.0);
-    let edge = (scr_min * 0.03).round() as u32;
-    let scale = (outer_text_px * 1.4) / VIEWPORT_H;
-    let font = &*TEXT_FONT;
-
-    let (content_w, content_h): (f32, f32) = match cfg.style {
-        BatteryStyle::Icon | BatteryStyle::Both => (VIEWPORT_W * scale, VIEWPORT_H * scale),
-        BatteryStyle::Text => {
-            let text = format!("{pct}%");
-            let s = PxScale::from(outer_text_px);
-            (line_width(font, s, &text), font.as_scaled(s).height())
-        }
-    };
-
-    let (px, py) = place(
-        img.width(),
-        img.height(),
-        content_w.ceil() as u32,
-        content_h.ceil() as u32,
-        cfg.position,
-        edge,
-    );
-
-    let Some(mut pm) = rgb_to_pixmap(img) else {
-        return;
-    };
-    let layout = Layout {
-        ox: px as f32,
-        oy: py as f32,
-        scale,
-    };
-    let fg = effective_fg(cfg, pct);
-
-    match cfg.style {
-        BatteryStyle::Icon => {
-            draw_silhouette(&mut pm, &layout, pct, fg, cfg.empty_color);
-        }
-        BatteryStyle::Text => {
-            let text = format!("{pct}%");
-            let s = PxScale::from(outer_text_px);
-            let baseline = layout.oy + font.as_scaled(s).ascent();
-            draw_line(
-                &mut pm,
-                font,
-                s,
-                layout.ox,
-                baseline,
-                &text,
-                fg.to_tiny_skia(),
-                None,
-            );
-        }
-        BatteryStyle::Both => {
-            draw_silhouette(&mut pm, &layout, pct, fg, cfg.empty_color);
-            draw_inverted_text(&mut pm, font, &layout, pct, fg, cfg.empty_color);
-        }
-    }
-
-    pixmap_to_rgb(&pm, img);
-}
-
 /// Body silhouette filled with `empty`, level fill from the left in `fg`,
 /// cap in `fg` at 100 % (the "fully charged" Android flourish) or `empty`
 /// otherwise.
@@ -254,7 +317,7 @@ fn draw_inverted_text(
     let text_px = TEXT_SIZE * layout.scale;
     let text = format!("{pct}");
     let px_scale = PxScale::from(text_px);
-    let text_w = line_width(font, px_scale, &text);
+    let text_w = text_width(font, px_scale, &text);
 
     // Centre in the 18×10 sub-canvas. Vertical baseline mirrors
     // BatteryPercentTextOnlyDrawable.kt: (canvas_h + text_size)/2 - nudge.
@@ -328,7 +391,6 @@ fn intersect_mask(dst: &mut Mask, other: &Mask) {
 mod tests {
     use super::*;
     use crate::config::{ColorConfig, Position};
-    use image::Rgb;
 
     fn cfg(style: BatteryStyle) -> BatteryIndicatorConfig {
         BatteryIndicatorConfig {
@@ -340,35 +402,59 @@ mod tests {
         }
     }
 
-    fn any_pixel_changed(img: &RgbImage, original: Rgb<u8>) -> bool {
-        img.pixels().any(|p| p != &original)
+    /// Fresh transparent canvas — snapshots only contain pixels the
+    /// overlay actually drew, which is much easier to review visually
+    /// than overlay-on-grey.
+    fn canvas(w: u32, h: u32) -> Pixmap {
+        Pixmap::new(w, h).expect("valid size")
+    }
+
+    fn ready(style: BatteryStyle, pct: u8) -> ReadyBatteryIndicator {
+        ReadyBatteryIndicator {
+            cfg: cfg(style),
+            pct: Some(pct),
+        }
     }
 
     #[test]
     fn renders_icon_only() {
-        let mut img = RgbImage::from_pixel(800, 600, Rgb([120, 120, 120]));
-        render(&mut img, &cfg(BatteryStyle::Icon), 75);
-        assert!(any_pixel_changed(&img, Rgb([120, 120, 120])));
+        let mut pm = canvas(800, 600);
+        ready(BatteryStyle::Icon, 75).render(&mut pm);
+        crate::test_snapshot::assert_matches(&pm, "battery_indicator/icon_75");
     }
 
     #[test]
     fn renders_text_only() {
-        let mut img = RgbImage::from_pixel(800, 600, Rgb([120, 120, 120]));
-        render(&mut img, &cfg(BatteryStyle::Text), 50);
-        assert!(any_pixel_changed(&img, Rgb([120, 120, 120])));
+        let mut pm = canvas(800, 600);
+        ready(BatteryStyle::Text, 50).render(&mut pm);
+        crate::test_snapshot::assert_matches(&pm, "battery_indicator/text_50");
     }
 
     #[test]
     fn renders_both() {
-        let mut img = RgbImage::from_pixel(800, 600, Rgb([120, 120, 120]));
-        render(&mut img, &cfg(BatteryStyle::Both), 100);
-        assert!(any_pixel_changed(&img, Rgb([120, 120, 120])));
+        let mut pm = canvas(800, 600);
+        ready(BatteryStyle::Both, 100).render(&mut pm);
+        crate::test_snapshot::assert_matches(&pm, "battery_indicator/both_100");
     }
 
     #[test]
     fn clamps_above_100() {
-        let mut img = RgbImage::from_pixel(800, 600, Rgb([120, 120, 120]));
-        apply(&mut img, &cfg(BatteryStyle::Both), 250);
+        let mut pm = canvas(800, 600);
+        ready(BatteryStyle::Both, 250).render(&mut pm);
+        // 250 clamps to 100 → must produce the same pixels as `renders_both`.
+        crate::test_snapshot::assert_matches(&pm, "battery_indicator/both_100");
+    }
+
+    #[test]
+    fn no_battery_data_is_a_noop() {
+        let mut pm = canvas(800, 600);
+        ReadyBatteryIndicator {
+            cfg: cfg(BatteryStyle::Both),
+            pct: None,
+        }
+        .render(&mut pm);
+        // Fresh Pixmap is fully transparent; no-op render must leave it that way.
+        assert!(pm.pixels().iter().all(|p| p.alpha() == 0));
     }
 
     #[test]

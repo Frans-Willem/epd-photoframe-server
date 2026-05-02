@@ -390,6 +390,10 @@ pub struct InfoboxConfig {
     pub longitude: f32,
     #[serde(default)]
     pub units: Units,
+    #[serde(default)]
+    pub header_layout: HeaderLayout,
+    #[serde(default)]
+    pub weather_layout: WeatherLayout,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -411,6 +415,58 @@ pub enum Units {
     #[default]
     Metric,
     Imperial,
+}
+
+impl Units {
+    pub fn temperature_suffix(self) -> &'static str {
+        match self {
+            Units::Metric => "°C",
+            Units::Imperial => "°F",
+        }
+    }
+}
+
+/// Which lines the infobox draws above its weather panel. Each variant
+/// renders in the screen's local timezone using the screen's date format.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum HeaderLayout {
+    /// No header.
+    None,
+    /// Just the date, e.g. `5 May 2026`.
+    Date,
+    /// Just the weekday, e.g. `Tuesday`.
+    Day,
+    /// Both: weekday on top, date below.
+    #[default]
+    DayDate,
+}
+
+/// Shape of the weather panel inside the infobox.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum WeatherLayout {
+    /// No weather rendered; weather fetch is skipped entirely.
+    None,
+    /// Today only: icon + min–max range on a single line.
+    #[default]
+    One,
+    /// Today's `One` line plus a row of 4 compact future-day cells.
+    OnePlusFour,
+    /// 5 compact day cells in a row, no special today treatment.
+    Five,
+}
+
+impl WeatherLayout {
+    /// How many days the layout needs from `weather::forecast`. Zero
+    /// means the network call is skipped entirely.
+    pub fn forecast_days_required(self) -> u32 {
+        match self {
+            WeatherLayout::None => 0,
+            WeatherLayout::One => 1,
+            WeatherLayout::OnePlusFour | WeatherLayout::Five => 5,
+        }
+    }
 }
 
 // ----- Battery indicator ----------------------------------------------------

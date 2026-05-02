@@ -5,15 +5,53 @@ use epd_dither::decompose::gray::{OffsetBlendGrayDecomposer, PureSpreadGrayDecom
 use epd_dither::decompose::naive::{NaiveDecomposer, NaiveDecomposerStrategy};
 use epd_dither::decompose::octahedron::{OctahedronDecomposer, OctahedronDecomposerAxisStrategy};
 use epd_dither::dither::DecomposingDitherStrategy;
-use epd_dither::dither::diffuse::diffuse_dither;
-use epd_dither::image_adapter::PaletteDitheringWithNoise;
-use image::{ImageBuffer, ImageFormat, Luma, Rgb, RgbImage};
+use epd_dither::dither::diffuse::{ImageReader, ImageSize, ImageWriter, diffuse_dither};
+use image::{ImageBuffer, ImageFormat, Luma, Rgb};
 use nalgebra::geometry::Point3;
 use rand::distr::StandardUniform;
 use rand::prelude::*;
+use tiny_skia::{Pixmap, PremultipliedColorU8};
 
 use crate::config::{DitherConfig, NoiseSource, Strategy};
 use crate::palette_image::{PaletteImage, VerifiedPalette};
+
+/// Bundles a borrowed `Pixmap` source, a per-pixel noise function, and a
+/// `PaletteImage` write target into the single value
+/// `epd_dither::dither::diffuse::diffuse_dither` wants. The canvas is opaque
+/// by construction (background painted opaque, overlays composite onto it),
+/// so premultiplied storage equals straight RGB and we read channel bytes
+/// directly.
+struct PixmapDitherInOut<'a, F> {
+    pixels: &'a [PremultipliedColorU8],
+    width: usize,
+    height: usize,
+    noise_fn: F,
+    writer: PaletteImage,
+}
+
+impl<F> ImageSize for PixmapDitherInOut<'_, F> {
+    fn width(&self) -> usize {
+        self.width
+    }
+    fn height(&self) -> usize {
+        self.height
+    }
+}
+
+impl<F: Fn(usize, usize) -> Option<f32>> ImageReader<(Rgb<u8>, Option<f32>)>
+    for PixmapDitherInOut<'_, F>
+{
+    fn get_pixel(&self, x: usize, y: usize) -> (Rgb<u8>, Option<f32>) {
+        let p = self.pixels[y * self.width + x];
+        (Rgb([p.red(), p.green(), p.blue()]), (self.noise_fn)(x, y))
+    }
+}
+
+impl<F> ImageWriter<usize> for PixmapDitherInOut<'_, F> {
+    fn put_pixel(&mut self, x: usize, y: usize, pixel: usize) {
+        self.writer.put_pixel(x, y, pixel);
+    }
+}
 
 /// 256x256 high-quality blue-noise texture from the upstream `epd-dither`
 /// repo (`HDR_L_0.png`). Embedded into the binary, decoded once on first
@@ -84,7 +122,7 @@ type BoxedPixelStrategy = Box<
 /// Cheap to clone — it's an `Arc` under the hood.
 #[derive(Clone)]
 pub struct PreparedDitherMethod {
-    inner: Arc<dyn Fn(RgbImage) -> anyhow::Result<PaletteImage> + Send + Sync>,
+    inner: Arc<dyn Fn(Pixmap) -> anyhow::Result<PaletteImage> + Send + Sync>,
 }
 
 impl PreparedDitherMethod {
@@ -97,11 +135,13 @@ impl PreparedDitherMethod {
         let noise = build_noise_fn(config.noise.clone());
         let matrix = config.diffuse.to_boxed_matrix();
 
-        let inner = Arc::new(move |img: RgbImage| -> anyhow::Result<PaletteImage> {
+        let inner = Arc::new(move |img: Pixmap| -> anyhow::Result<PaletteImage> {
             let (width, height) = (img.width(), img.height());
             let writer = PaletteImage::new(width, height, output_palette.clone());
-            let mut inout = PaletteDitheringWithNoise {
-                image: img,
+            let mut inout = PixmapDitherInOut {
+                pixels: img.pixels(),
+                width: width as usize,
+                height: height as usize,
                 noise_fn: &noise,
                 writer,
             };
@@ -116,7 +156,7 @@ impl PreparedDitherMethod {
     /// (allocation, internal invariants); configuration errors were filtered
     /// out at `prepare` time, but the result is `Result` so request handlers
     /// can turn unexpected failures into 500s rather than panicking.
-    pub fn run(&self, img: RgbImage) -> anyhow::Result<PaletteImage> {
+    pub fn run(&self, img: Pixmap) -> anyhow::Result<PaletteImage> {
         (self.inner)(img)
     }
 }
@@ -251,8 +291,10 @@ mod tests {
     #[test]
     fn prepared_gray_pipeline_produces_indexed_png() {
         use crate::config::{DiffuseMethod, NoiseSource, Palette, Strategy};
+        use tiny_skia::Color;
 
-        let img = RgbImage::from_pixel(8, 4, Rgb([128, 128, 128]));
+        let mut img = Pixmap::new(8, 4).expect("valid size");
+        img.fill(Color::from_rgba8(128, 128, 128, 255));
         let cfg = DitherConfig {
             noise: NoiseSource::None,
             strategy: Strategy::GrayPureSpread(0.25),

@@ -79,7 +79,9 @@ error_refresh = "1h"
 #                 device class)
 publish = ["battery", "temperature", "humidity", "power", "last_seen"]
 
-# Optional info overlay — day of week, date, weather.
+# Optional info overlay — day of week, date, weather. The header (date /
+# day text) and weather panel are configured independently; setting both
+# `*_layout` keys to "none" suppresses the overlay entirely.
 [screens.infobox]
 position = "bottom-left"       # top-left | top | top-right | left | right | bottom-left | bottom | bottom-right
 background = "rgba(255, 255, 255, 0.8)"
@@ -87,6 +89,20 @@ foreground = "#000000"
 latitude = 52.37
 longitude = 4.90
 units = "metric"               # metric (°C, km/h) | imperial (°F, mph)
+# Header section above the weather:
+#   none      — no header
+#   day       — "Tuesday"
+#   date      — "5 May 2026"
+#   day-date  — both lines, day on top  (default)
+header_layout = "day-date"
+# Weather section. The multi-day variants need a tall display to fit
+# legibly — recommended for E1004 (1200×1600) only; on E1001 / E1002 the
+# row of compact cells is too small to read.
+#   none           — no weather (skips the Open-Meteo fetch entirely)
+#   one            — today's icon + min–max range, single line  (default)
+#   one-plus-four  — today's line on top, then a row of 4 future-day cells
+#   five           — a row of 5 compact day-cells starting with today
+weather_layout = "one"
 
 # Optional battery indicator. Renders only when the request includes a
 # `battery_pct` query parameter (the device sends it; the server doesn't

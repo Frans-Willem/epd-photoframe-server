@@ -1,13 +1,12 @@
 use ab_glyph::{Font, GlyphId, PxScale, ScaleFont, point};
-use image::RgbImage;
 use tiny_skia::{
     Color, FillRule, Mask, Paint, PathBuilder, Pixmap, PixmapPaint, PremultipliedColorU8, Shader,
     Transform,
 };
 
-use crate::config::{ColorConfig, Position};
+use crate::config::ColorConfig;
 
-pub fn line_width<F: Font>(font: &F, scale: PxScale, text: &str) -> f32 {
+pub fn text_width<F: Font>(font: &F, scale: PxScale, text: &str) -> f32 {
     let s = font.as_scaled(scale);
     let mut prev: Option<GlyphId> = None;
     let mut w = 0.0;
@@ -150,60 +149,4 @@ pub fn asymmetric_rounded_rect_path(
     pb.cubic_to(x, y + lr - lcp, x + lr - lcp, y, x + lr, y);
     pb.close();
     pb.finish()
-}
-
-pub fn rgb_to_pixmap(img: &RgbImage) -> Option<Pixmap> {
-    let mut pm = Pixmap::new(img.width(), img.height())?;
-    let src = img.as_raw();
-    let dst = pm.pixels_mut();
-    for (i, pixel) in dst.iter_mut().enumerate() {
-        // Opaque source → premul == straight RGBA.
-        *pixel = PremultipliedColorU8::from_rgba(src[i * 3], src[i * 3 + 1], src[i * 3 + 2], 255)
-            .expect("alpha=255, always valid");
-    }
-    Some(pm)
-}
-
-pub fn pixmap_to_rgb(pm: &Pixmap, img: &mut RgbImage) {
-    // Compositing onto an opaque base keeps alpha at 255, so premul == straight.
-    let src = pm.pixels();
-    let dst = img.as_mut();
-    for (i, p) in src.iter().enumerate() {
-        dst[i * 3] = p.red();
-        dst[i * 3 + 1] = p.green();
-        dst[i * 3 + 2] = p.blue();
-    }
-}
-
-pub fn place(
-    scr_w: u32,
-    scr_h: u32,
-    box_w: u32,
-    box_h: u32,
-    pos: Position,
-    edge: u32,
-) -> (i32, i32) {
-    let (sw, sh, bw, bh, e) = (
-        scr_w as i32,
-        scr_h as i32,
-        box_w as i32,
-        box_h as i32,
-        edge as i32,
-    );
-    let left = e;
-    let right = (sw - bw - e).max(0);
-    let top = e;
-    let bottom = (sh - bh - e).max(0);
-    let hcenter = ((sw - bw) / 2).max(0);
-    let vcenter = ((sh - bh) / 2).max(0);
-    match pos {
-        Position::TopLeft => (left, top),
-        Position::Top => (hcenter, top),
-        Position::TopRight => (right, top),
-        Position::Left => (left, vcenter),
-        Position::Right => (right, vcenter),
-        Position::BottomLeft => (left, bottom),
-        Position::Bottom => (hcenter, bottom),
-        Position::BottomRight => (right, bottom),
-    }
 }

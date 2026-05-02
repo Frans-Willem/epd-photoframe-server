@@ -159,7 +159,10 @@ defaults. The example config covers:
 - **Rotation schedule** — when to reshuffle to a new photo. Cron
   expressions or natural-language phrases like "at 6 AM and 6 PM".
 - **Info overlay** — date, day of week, and current weather, drawn in a
-  corner of the image.
+  corner of the image. The header (day / date) and weather panel are
+  configured independently — show one, both, or neither — and on a tall
+  display (E1004) the weather can expand into a multi-day forecast row
+  alongside or instead of today's reading.
 - **Battery indicator** — a small Android-style battery icon showing
   the level the frame reported.
 - **Dithering** — noise pattern, error-diffusion algorithm, and which
