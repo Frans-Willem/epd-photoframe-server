@@ -1,24 +1,14 @@
-use std::sync::LazyLock;
-
-use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
 use async_trait::async_trait;
 use chrono::{DateTime, Datelike};
 use chrono_tz::Tz;
+use taffy::prelude::*;
 use tiny_skia::Pixmap;
 
+use super::drawable::{Drawable, walk};
 use super::{Overlay, OverlayContext, ReadyOverlay};
 use crate::config::{InfoboxConfig, Units};
-use crate::draw::{draw_line, line_width, paint_rounded_rect, place};
+use crate::draw::place;
 use crate::weather::{self, DailyWeather};
-
-static TEXT_FONT: LazyLock<FontRef<'static>> = LazyLock::new(|| {
-    FontRef::try_from_slice(include_bytes!("../../assets/LiberationSans-Bold.ttf"))
-        .expect("bundled text font is invalid")
-});
-static ICON_FONT: LazyLock<FontRef<'static>> = LazyLock::new(|| {
-    FontRef::try_from_slice(include_bytes!("../../assets/WeatherIcons-Regular.ttf"))
-        .expect("bundled icon font is invalid")
-});
 
 impl Units {
     fn temperature_suffix(self) -> &'static str {
@@ -91,9 +81,9 @@ impl ReadyOverlay for ReadyInfobox {
         // a short status string instead of the temperature range. The full
         // error goes to the server-side log; the box is too narrow for a
         // useful detail.
-        let (icon_text, weather_text) = match self.weather {
+        let (icon_glyph, weather_text) = match self.weather {
             Some(w) => (
-                wmo_icon(Some(w.weather_code)).to_string(),
+                wmo_icon(Some(w.weather_code)),
                 format!(
                     "{:.0}–{:.0}{}",
                     w.temperature_min.round(),
@@ -101,7 +91,7 @@ impl ReadyOverlay for ReadyInfobox {
                     cfg.units.temperature_suffix()
                 ),
             ),
-            None => (wmo_icon(None).to_string(), "Weather error".to_string()),
+            None => (wmo_icon(None), "Weather error".to_string()),
         };
 
         let scr_min = canvas.width().min(canvas.height()) as f32;
@@ -112,35 +102,85 @@ impl ReadyOverlay for ReadyInfobox {
         let icon_gap = text_px * 0.3;
         let edge = (scr_min * 0.03).round() as u32;
         let radius = text_px * 0.6;
-
-        let text_font: &FontRef<'static> = &TEXT_FONT;
-        let icon_font: &FontRef<'static> = &ICON_FONT;
-        let text_scale = PxScale::from(text_px);
-        let icon_scale = PxScale::from(icon_px);
-        let text_s = text_font.as_scaled(text_scale);
-        let icon_s = icon_font.as_scaled(icon_scale);
-
-        let text_line_h = text_s.height();
-        let text_ascent = text_s.ascent();
-        let icon_line_h = icon_s.height();
-        let icon_ascent = icon_s.ascent();
-        let weather_line_h = text_line_h.max(icon_line_h);
-
-        let day_w = line_width(text_font, text_scale, &day_text);
-        let date_w = line_width(text_font, text_scale, &date_text);
-        let icon_w = line_width(icon_font, icon_scale, &icon_text);
-        let weather_text_w = line_width(text_font, text_scale, &weather_text);
-        let weather_w = icon_w + icon_gap + weather_text_w;
-
-        let content_w = day_w.max(date_w).max(weather_w);
-        let content_h = text_line_h + line_gap + text_line_h + line_gap + weather_line_h;
-
-        let box_w = (content_w + 2.0 * internal_pad).ceil() as u32;
-        let box_h = (content_h + 2.0 * internal_pad).ceil() as u32;
-
-        let bg = cfg.background;
         let fg = cfg.foreground;
 
+        // Build the layout tree: a Column flex with three children (day, date,
+        // weather line), with a rounded background attached to the root so it
+        // paints first during the walk.
+        let mut tree: TaffyTree<Drawable> = TaffyTree::new();
+        let day = tree
+            .new_leaf_with_context(
+                Style::default(),
+                Drawable::Text {
+                    content: day_text,
+                    size: text_px,
+                    color: fg,
+                },
+            )
+            .expect("create day leaf");
+        let date = tree
+            .new_leaf_with_context(
+                Style::default(),
+                Drawable::Text {
+                    content: date_text,
+                    size: text_px,
+                    color: fg,
+                },
+            )
+            .expect("create date leaf");
+        let weather = tree
+            .new_leaf_with_context(
+                Style::default(),
+                Drawable::IconText {
+                    icon: icon_glyph,
+                    icon_size: icon_px,
+                    gap: icon_gap,
+                    text: weather_text,
+                    text_size: text_px,
+                    color: fg,
+                },
+            )
+            .expect("create weather leaf");
+        let root = tree
+            .new_with_children(
+                Style {
+                    display: Display::Flex,
+                    flex_direction: FlexDirection::Column,
+                    padding: Rect::length(internal_pad),
+                    gap: Size {
+                        width: length(0.0),
+                        height: length(line_gap),
+                    },
+                    ..Default::default()
+                },
+                &[day, date, weather],
+            )
+            .expect("create root");
+        tree.set_node_context(
+            root,
+            Some(Drawable::Background {
+                color: cfg.background,
+                radius,
+            }),
+        )
+        .expect("attach background context");
+
+        tree.compute_layout_with_measure(
+            root,
+            Size {
+                width: AvailableSpace::MaxContent,
+                height: AvailableSpace::MaxContent,
+            },
+            |_known, _avail, _id, ctx, _style| {
+                ctx.map(|d: &mut Drawable| d.measure())
+                    .unwrap_or(Size::ZERO)
+            },
+        )
+        .expect("compute layout");
+
+        let bbox = tree.layout(root).expect("root layout").size;
+        let box_w = bbox.width.ceil() as u32;
+        let box_h = bbox.height.ceil() as u32;
         let (px, py) = place(
             canvas.width(),
             canvas.height(),
@@ -150,56 +190,9 @@ impl ReadyOverlay for ReadyInfobox {
             edge,
         );
 
-        paint_rounded_rect(
-            canvas,
-            px as f32,
-            py as f32,
-            box_w as f32,
-            box_h as f32,
-            radius,
-            bg,
-        );
-
-        let ox = px as f32 + internal_pad;
-        let mut slot_top = py as f32 + internal_pad;
-        let fg_ts = fg.to_tiny_skia();
-        draw_line(
-            canvas,
-            text_font,
-            text_scale,
-            ox,
-            slot_top + text_ascent,
-            &day_text,
-            fg_ts,
-            None,
-        );
-        slot_top += text_line_h + line_gap;
-        draw_line(
-            canvas,
-            text_font,
-            text_scale,
-            ox,
-            slot_top + text_ascent,
-            &date_text,
-            fg_ts,
-            None,
-        );
-        slot_top += text_line_h + line_gap;
-        // Weather line: share a baseline so icon and temperature align visually.
-        let baseline = slot_top + text_ascent.max(icon_ascent);
-        draw_line(
-            canvas, icon_font, icon_scale, ox, baseline, &icon_text, fg_ts, None,
-        );
-        draw_line(
-            canvas,
-            text_font,
-            text_scale,
-            ox + icon_w + icon_gap,
-            baseline,
-            &weather_text,
-            fg_ts,
-            None,
-        );
+        walk(&tree, root, px as f32, py as f32, &mut |x, y, w, h, d| {
+            d.draw(canvas, x, y, w, h);
+        });
     }
 
     fn degraded(&self) -> bool {

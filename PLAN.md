@@ -414,7 +414,7 @@ output is pixel-identical to the current code for the default config.
 
 # Sequencing
 
-Total: 10 commits across 4 stages, each step independently shippable.
+Total: 9 commits across 4 stages, each step independently shippable.
 Each step ends with the build green and existing tests passing.
 Behaviour changes are explicit in the step description; pure refactors
 are called out.
@@ -492,49 +492,42 @@ before this commit (snapshot test from Stage 1 still passes).
 `cargo test` clean. Server-side log timing shows weather fetch
 overlapped with photo retrieval.
 
-## Stage 3 — Taffy migration (2 commits)
+## Stage 3 — Taffy migration (1 commit)
 
-### Step 3 — taffy + `Drawable` scaffolding
+### Step 3 — taffy + `Drawable` scaffolding + `Infobox` refactor
 
-**Files:** new module (e.g. `src/overlays/draw.rs`), `Cargo.toml`
-(add `taffy`).
+**Files:** new `src/overlays/drawable.rs`, `src/overlays/mod.rs`,
+`src/overlays/infobox.rs`, `Cargo.toml` (add `taffy`).
+
+Trait/scaffolding and first caller land together: the `Drawable`
+shape only gets validated by an actual caller using it. The Stage 2
+snapshot tests (`tests/snapshots/infobox/{with,without}_weather.png`)
+guarantee no pixel drift.
 
 **Changes:**
-- Add the `Drawable` enum (`Text` / `Icon` / `Background`) with
-  `impl Drawable { fn measure(&self) -> taffy::Size<f32>; fn
-  draw(&self, canvas: &mut Pixmap, x, y, w, h); }`.
-- Methods delegate to the existing `draw_text` / `draw_glyph` /
-  `paint_rounded_rect` helpers in `src/overlay.rs`.
-- Add `walk(&tree, root, ox, oy, &mut visit)` helper for a depth-first
+- Add the `Drawable` enum with variants `Text`, `Icon`,
+  `Background`, and `IconText` (the last is a baseline-aligned
+  composite for the today weather line — icon + label sharing a
+  baseline, where flexbox baseline alignment is fiddly across fonts
+  with different metrics). Each variant carries its colour.
+- `impl Drawable { fn measure(&self) -> taffy::Size<f32>; fn
+  draw(&self, canvas: &mut Pixmap, x, y, w, h); }` — methods
+  delegate to the existing `draw_line` / `paint_rounded_rect`
+  helpers in `src/draw.rs`.
+- Add `walk(&tree, root, ox, oy, &mut visit)` helper: depth-first
   visitor that calls a closure on every node with context (parent
   before children, so backgrounds end up underneath).
-- No callers yet.
+- Refactor `Infobox::render` to: build a small taffy `Column` tree
+  with the rounded `Background` on the root and `Text` / `Text` /
+  `IconText` children, compute layout, walk and paint.
 
-**Acceptance:** `cargo build` clean. Helpers have unit tests that
-build a tiny tree, compute layout, and verify the walker visits in
-the right order with correct accumulated coordinates.
-
-### Step 4 — Refactor `Infobox::render` onto taffy + `Drawable` (pure refactor)
-
-**Files:** `src/infobox.rs`.
-
-**Changes:**
-- Replace the current monolithic `render` with: build a small taffy
-  tree of `Drawable`-bearing nodes (rounded `Background` on the
-  root, `Text` / `Icon` leaves for the day name, date, and
-  icon-with-temps line), call `compute_layout_with_measure` with
-  `Drawable::measure`, then `walk` and paint with `Drawable::draw`.
-- Behaviour unchanged — current single-day layout, same fonts, same
-  positions.
-- Add a snapshot/golden render test against the existing output as
-  part of this commit, so subsequent steps can detect any drift.
-
-**Acceptance:** Pixel-identical render for the current behaviour (the
-new snapshot test passes).
+**Acceptance:** Snapshot tests for both `with_weather` and
+`without_weather` pass without regenerating. `cargo build` and
+`cargo test` clean.
 
 ## Stage 4 — Multi-day layouts (6 commits)
 
-### Step 5 — Add `HeaderLayout` + `WeatherLayout` config (no behaviour change)
+### Step 4 — Add `HeaderLayout` + `WeatherLayout` config (no behaviour change)
 
 **Files:** `src/config.rs`, `src/infobox.rs` (constructor only).
 
@@ -550,7 +543,7 @@ new snapshot test passes).
 `header_layout = "day-date"` / `weather_layout = "one"` both render
 identically to before.
 
-### Step 6 — Wire layout fields for all single-day combinations
+### Step 5 — Wire layout fields for all single-day combinations
 
 **Files:** `src/infobox.rs`.
 
@@ -567,7 +560,7 @@ identically to before.
 Header-only and weather-only render correctly; `none + none` is a
 no-op overlay.
 
-### Step 7 — Generalise weather fetch + add `compact_cell` tree-builder
+### Step 6 — Generalise weather fetch + add `compact_cell` tree-builder
 
 **Files:** `src/weather.rs`, `src/infobox.rs` (or new helper module).
 
@@ -586,7 +579,7 @@ no-op overlay.
 **Acceptance:** Existing single-day infobox behaviour unchanged
 (snapshot test still passes); helper test passes.
 
-### Step 8 — Implement `weather_layout = one-plus-four`
+### Step 7 — Implement `weather_layout = one-plus-four`
 
 **Files:** `src/infobox.rs`.
 
@@ -598,7 +591,7 @@ no-op overlay.
 **Acceptance:** New layout renders; tests pass; manual visual check
 on E1004 matches the mockup.
 
-### Step 9 — Implement `weather_layout = five`
+### Step 8 — Implement `weather_layout = five`
 
 **Files:** `src/infobox.rs`.
 
@@ -610,7 +603,7 @@ on E1004 matches the mockup.
 **Acceptance:** New layout renders; tests pass; manual visual check
 on E1004 matches the mockup.
 
-### Step 10 — Documentation
+### Step 9 — Documentation
 
 **Files:** `README.md`, `config.example.toml`.
 

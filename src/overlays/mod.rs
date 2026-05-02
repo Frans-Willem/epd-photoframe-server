@@ -9,6 +9,7 @@
 //! `degraded.rs` uses them too and isn't itself an overlay.
 
 mod battery_indicator;
+mod drawable;
 mod infobox;
 mod traits;
 
