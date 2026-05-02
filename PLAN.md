@@ -1,172 +1,630 @@
-# Cleanup plan
+# Overlay refactor + multi-day weather forecast
 
-One commit per item, ordered smallest-first. Item 8 (dither refactor) is
-the biggest concrete-code win; #9 (release pipeline) is the biggest
-overall in scope but optional. Everything before #7 is small polish that
-can be cut or reordered freely.
+Two phases, in order:
 
-## 1. `seconds_until` use `i64::div_ceil`
+1. **Overlay abstraction** — pull the existing battery indicator and
+   infobox out from inline calls in the request handler and behind a
+   uniform `Overlay` trait. Preprocess (e.g. weather fetch) runs in
+   parallel with photo retrieval.
+2. **Multi-day weather forecast** — lands as added configuration and
+   render code on the new `Infobox` overlay; the existing
+   single-day infobox is preserved as the default combination.
 
-**Size:** trivial (1 line). **File:** `src/screen_state.rs:168`.
+A reference mockup of the new weather variants on E1004 lives at
+`/tmp/e1004_forecast_layouts.html` (built by `/tmp/build_layouts.py`).
 
-Replace `(ms + 999) / 1000` with `ms.div_ceil(1000)` (stable since 1.79).
-Pure cosmetic.
+---
 
-## 2. Drop stale `#[allow(dead_code)]` on `ColorConfig::rgba`
+# Phase 1 — Overlay abstraction + unified Pixmap pipeline
 
-**Size:** trivial (1 line). **File:** `src/config.rs:248`.
+## Goal
 
-The attribute is leftover — `Self::rgba(...)` is called from `from_str`
-(lines 280, 290), so the function isn't dead. Just delete the line and
-confirm `cargo build` stays clean.
+Two tightly-coupled refactors that ship together:
 
-## 3. Drop `Arc<String>` to `String` for `AlbumClient::share_url`
+1. **Decouple individual overlay components** (currently
+   `battery_indicator` and `infobox`/weather) from the screen render
+   pipeline behind a uniform trait. Each overlay declares its own
+   async preprocess (which can fetch external data, snapshot sensor
+   state, etc.) and a synchronous render that draws onto the canvas.
+2. **Make `tiny_skia::Pixmap` the canonical pipeline format** instead
+   of `image::RgbImage`. A single Pixmap is allocated per request,
+   the background and photo are painted into it, overlays render
+   onto it, and the dither pipeline reads from it via `epd-dither`'s
+   `ImageReader` trait. The current `rgb_to_pixmap` / `pixmap_to_rgb`
+   round-trips inside the infobox disappear.
 
-**Size:** small. **File:** `src/album.rs:26`.
+## Pipeline
 
-Field type change only. `AlbumClient` is already cloned via the
-screen-map's `Arc`, so the inner `Arc<String>` is redundant.
+For each screen request:
 
-## 4. Single source of truth for `PowerState` variants
+1. Allocate one `Pixmap` at the screen's `(width, height)`.
+2. In parallel:
+   - Photo retrieval → resize → paint onto the Pixmap (background
+     colour first, then the resized photo on top).
+   - `preprocess` for every overlay (single `tokio::join!` /
+     `try_join_all`).
+3. Once both are done: call each `ReadyOverlay::render(&mut Pixmap)`
+   in list order.
+4. Pass the Pixmap (via a thin `PixmapReader` wrapper implementing
+   `ImageSize + ImageReader`) to the dither pipeline. Dither output
+   format unchanged.
 
-**Size:** small. **Files:** `src/main.rs` (enum), `src/mqtt.rs:63-69`
-(POWER sensor's `options` literal).
+Net latency win: weather fetch (currently inside infobox rendering,
+serialised after photo retrieval) now overlaps with the photo
+download. Battery indicator preprocess is trivial today but the
+uniform model leaves room for future overlays that need their own
+async work (calendar, notifications, etc.).
 
-Goal: one place to add a new `PowerState` variant. Without a derive
-macro (e.g. `strum::EnumIter`) we still have to list the variants once,
-but we can put the list and the string mapping in the same impl block as
-the enum, so adding `Charging2` only means touching `main.rs`.
+Memory cost of the Pixmap-as-canonical change: 1 byte/pixel extra
+(RGBA vs RGB). On E1004 that's ~1.9 MB more per in-flight request
+— negligible.
 
-Two pieces on `PowerState`:
+## Trait sketch
+
+Approximate shape — finalise during implementation.
 
 ```rust
-impl PowerState {
-    pub const ALL: &[Self] = &[Self::Battery, Self::Charging, Self::Full, Self::Fault];
+pub struct OverlayContext<'a> {
+    pub now:         DateTime<chrono_tz::Tz>,
+    pub sensors:     &'a SensorState,        // battery %, etc. from MQTT
+    pub http:        &'a reqwest::Client,
+    pub canvas_size: (u32, u32),
+}
 
-    pub const fn as_str(self) -> &'static str {
-        match self { Self::Battery => "battery", /* … */ }
+#[async_trait]
+pub trait Overlay: Send + Sync {
+    async fn preprocess(&self, ctx: &OverlayContext<'_>)
+        -> Box<dyn ReadyOverlay + Send>;
+}
+
+pub trait ReadyOverlay {
+    fn render(&self, canvas: &mut tiny_skia::Pixmap);
+}
+```
+
+`OverlayContext` carries **only request-time state** (current
+timestamp, latest sensor snapshot, shared HTTP client, target canvas
+size). Anything from the screen or per-overlay config that the
+overlay needs — timezone, position, lat/long, layout choices,
+thresholds — is captured by the overlay struct at construction time
+(during config load), not looked up on every preprocess call.
+
+A screen holds a `Vec<Box<dyn Overlay>>` built once at config load.
+Order in the vec = render order (later overlays draw on top).
+
+## Layout: taffy + a `Drawable` context enum
+
+Decision recorded from the SVG-library investigation: layout uses
+**[taffy](https://github.com/DioxusLabs/taffy)**, rendering stays in
+`tiny-skia` + `ab_glyph`, and every node in the taffy tree carries an
+optional `Drawable` context describing how it should be painted:
+
+```rust
+enum Drawable {
+    Text       { content: String, font: FontKey, size: f32 },
+    Icon       { glyph: char, size: f32 },
+    Background { color: Color, radius: f32 },     // parent decoration
+    // future: Border, Divider, ...
+}
+
+impl Drawable {
+    /// Intrinsic size — used by taffy's measure callback for leaves.
+    /// Backgrounds return ZERO since they're sized by their parent box.
+    fn measure(&self) -> taffy::Size<f32> {
+        match self {
+            Drawable::Text { content, font, size } => measure_text(content, *font, *size),
+            Drawable::Icon { glyph, size }         => measure_glyph(*glyph, *size),
+            Drawable::Background { .. }            => taffy::Size::ZERO,
+        }
+    }
+
+    /// Paint at the absolute (x, y) computed by taffy. `w`/`h` are the
+    /// node's computed box size — only used by Background.
+    fn draw(&self, canvas: &mut tiny_skia::Pixmap, x: f32, y: f32, w: f32, h: f32) {
+        match self {
+            Drawable::Text { content, font, size } => draw_text(canvas, x, y, content, *font, *size),
+            Drawable::Icon { glyph, size }         => draw_glyph(canvas, x, y, *glyph, *size),
+            Drawable::Background { color, radius } => paint_rounded_rect(canvas, x, y, w, h, *radius, *color),
+        }
     }
 }
 ```
 
-Have the `Display` impl forward to `as_str`. In `mqtt.rs`, change
-`Sensor.options` from `Option<&'static [&'static str]>` to
-`Option<&'static [PowerState]>`, point `POWER.options` at
-`PowerState::ALL`, and have `publish_discovery` map `as_str` over them
-when building the JSON (a `Vec<&'static str>` allocation at startup is
-fine — it runs once per screen on connect).
+With that, the integration with taffy is one-liner closures:
 
-## 5. Replace `Duration::from_std(...).unwrap_or_default()` pattern
+```rust
+tree.compute_layout_with_measure(
+    root, Size::MAX_CONTENT,
+    |_known, _avail, _id, ctx, _style| ctx.map(Drawable::measure).unwrap_or(Size::ZERO),
+).unwrap();
 
-**Size:** small (validation in config + helper + 3 call sites).
-**Files:** `src/config.rs`, `src/main.rs:311`, `src/screen_state.rs:182,185`.
+walk(&tree, root, ox, oy, &mut |x, y, w, h, ctx| ctx.draw(canvas, x, y, w, h));
+```
 
-`chrono::Duration::from_std` only fails for durations larger than
-`i64::MAX` milliseconds (~292 million years). The values at the call
-sites are all parsed from config TOML via `humantime`, so the failure
-condition can only be triggered by a deliberately malformed config —
-e.g. `wake_delay = "1000000000000y"`. A request-time panic on bad config
-is a worse error mode than a config-load failure, so:
+Leaves carry `Text` / `Icon` and contribute their measured size.
+Parents that want a background carry `Background` — attached via
+`set_node_context` on a `new_with_children` node, so they're sized
+normally by their children + style. Layout computes the tree; a
+single uniform walk visits every node and calls `draw()` on its
+`Drawable` (parent before children, so backgrounds end up
+underneath).
 
-1. Tighten `deserialize_duration` in `config.rs` to reject any value
-   that doesn't round-trip through `chrono::Duration::from_std`. Same
-   error path as the rest of the deserializer (returns
-   `serde::de::Error`), so a bad value is caught at startup with a
-   clear message.
-2. With that guarantee in hand, add a helper at the top of
-   `screen_state.rs`:
-   ```rust
-   fn add_std(t: DateTime<Utc>, d: Duration) -> DateTime<Utc> {
-       t + chrono::Duration::from_std(d).expect("validated at config load")
-   }
-   ```
-   The `expect` is now genuinely unreachable in normal operation —
-   anything that survived config parsing will convert.
-3. Replace the three call sites with `add_std(...)`.
+Each overlay's `render` function thus has a consistent shape:
+build a small taffy tree, compute layout, walk and paint. **Adding a
+new visual primitive is one new `Drawable` variant + two arms in the
+`measure`/`draw` impl — no change to the measure callback, the
+walker, or any overlay that doesn't use it.**
 
-Net: panic moves from "could fire on every request once a bad config is
-loaded" to "can't fire after config load completes".
+## Concrete overlays
 
-## 6. Drop the `?action=next/previous` cache-invalidation question
+- **`BatteryIndicator`** — preprocess just snapshots the relevant
+  fields from `ctx.sensors`. Render is the existing
+  `battery_indicator::apply` body, unchanged.
+- **`Infobox`** — preprocess fetches weather (skipped if
+  `weather_layout = none`); also captures `ctx.now` so render uses a
+  consistent timestamp. Render produces the header + weather sections
+  per the layout config (Phase 2).
 
-**Size:** none. No code change.
+## Errors
 
-Resolved on review: only `refresh` invalidates the album cache; `next`
-/ `previous` step within the current shuffle. (They still snap onto
-newly-arrived photos when the cache is replaced for other reasons —
-that's the existing behaviour.) README already describes this
-correctly. Item kept in the list as a marker so the question doesn't
-re-surface.
+`preprocess` should always succeed — failed external fetches produce
+a `ReadyOverlay` that renders an error indicator (matches current
+"Weather error" text behaviour). This keeps the pipeline simple
+(no `Result`-typed joins) and gives users feedback on the screen
+when something's wrong, instead of failing the whole request.
 
-## 7. Add minimal CI workflow
+If a hard internal error happens (e.g. the icon font failed to
+load), `preprocess` returns a `ReadyOverlay` whose `render` is a
+no-op — the photo just renders without that overlay.
 
-**Size:** medium (one new file, ~30-50 lines YAML). **File:**
-`.github/workflows/ci.yml` (new).
+## Configuration
 
-Triggers on push and PR. Two jobs on stable Rust:
-- `cargo build --release --locked`
-- `cargo test --locked`
+No new top-level config concept. The screen continues to declare its
+overlays via the existing named sections (`[screens.X.infobox]`,
+`[screens.X.battery_indicator]`); the screen builder turns whichever
+sections are present into the `Vec<Box<dyn Overlay>>`. So the user-
+facing config doesn't change for Phase 1.
 
-Cache `~/.cargo/registry` and `target/` keyed on `Cargo.lock`. Skip
-clippy/fmt gates for now to keep the bar low — can tighten later.
+## Open questions (Phase 1)
 
-Now that the README invites people to try the project, broken-build PRs
-should be caught before merge.
+- **Z-order across overlays**: render in list order is fine for the
+  current two; revisit if/when overlays start overlapping.
+- **Preprocess cancellation**: if photo retrieval fails, do we cancel
+  in-flight overlay preprocesses or let them finish? Letting them
+  finish is simpler and lets cached state (e.g. weather) be reused
+  by the next request — recommend that.
+- **Async-trait dependency**: `async_trait` macro vs native async-fn-
+  in-trait. Native works on stable but trait objects still need
+  `Pin<Box<dyn Future>>` boilerplate; `async_trait` keeps the trait
+  declaration readable. Defer the call to implementation.
 
-## 8. Refactor `dither::process` strategy match
+---
 
-**Size:** largest code change (~50 lines saved across one file).
-**File:** `src/dither.rs`, lines 114-256.
+# Phase 2 — Multi-day weather forecast
 
-The 9-arm match repeats the same 7-line `decomposer +
-DecomposingDitherStrategy::new + diffuse_dither` block; only the
-decomposer type and the colour-→-point mapper differ.
+## Goal
 
-Plan:
-- Add small factory helpers — `octahedron_with(strategy)`,
-  `naive_with(strategy)` — that build the decomposer and propagate the
-  construction error.
-- Add one generic `run<D, F, P>(decomposer, mapper, matrix, inout)` that
-  calls `diffuse_dither(DecomposingDitherStrategy::new(...), ...)` once.
-- Each arm collapses to a single line, e.g.
-  `Strategy::OctahedronClosest => run(octahedron_with(&palette_points, AxisStrategy::Closest)?, color_to_point, matrix, &mut inout)`.
+Decouple the infobox into two independently-configured sections —
+a **header** (day / date text) and a **weather** panel — and add
+multi-day forecast variants for the larger E1004 display. The
+existing single-day infobox is one specific combination of the two
+sections; the default config reproduces it exactly.
 
-Saves ~50 lines. The strategy table reads as a flat list.
+This work lands inside the `Infobox` overlay introduced in Phase 1.
 
-**Risk:** trait bounds on `Decomposer<P>` may not fan out cleanly across
-both the colour path (`color_to_point: Rgb<u8> -> Point3<f32>`) and the
-grayscale path (`rgb_to_brightness: Rgb<u8> -> f32`). If `run` ends up
-needing two variants, abandon and revert — the win isn't worth a more
-complex helper than the original match.
+## Configuration
 
-## 9. Release pipeline + versioning *(optional, follow-up)*
+Two new fields on `InfoboxConfig`:
 
-**Size:** medium-to-large (multi-platform builds + tag conventions).
-**Files:** `.github/workflows/release.yml` (new), `Cargo.toml` (version
-bumps).
+```toml
+[screens.living_room.infobox]
+header_layout  = "day-date"   # none | date | day | day-date
+weather_layout = "one"        # none | one | one-plus-four | five
+```
 
-Open question raised on review: should we publish pre-built binaries
-and/or a pre-built Docker image, and adopt explicit versioning?
+Defaults: `header_layout = "day-date"`, `weather_layout = "one"` —
+together this reproduces the current single-day infobox exactly, so
+existing configs are unaffected.
 
-Plausible shape if yes:
+If both are `none`, the infobox is not rendered at all.
 
-- **Versioning:** SemVer in `Cargo.toml`. Releases are git tags
-  `v0.1.0`, `v0.2.0`, … pushed manually. CI keys release jobs off
-  `push` events for `v*` tags.
-- **Binaries:** GitHub Actions matrix building `linux-x86_64-gnu`
-  and `linux-aarch64-gnu` (the latter via `cross` or a native arm64
-  runner). Upload as release assets. Mac / Windows skipped — the
-  target audience runs this on a server.
-- **Docker image:** publish to GHCR
-  (`ghcr.io/Frans-Willem/epd-photoframe-server`) via
-  `docker/build-push-action`. Tagged with the release version and
-  `latest`. Multi-arch via QEMU buildx.
-- **README docker-compose example** updated to offer
-  `image: ghcr.io/...` as a one-liner alternative to the
-  `build: ./epd-photoframe-server` we currently show.
+Naming follows the existing `kebab-case` convention used by
+`Position` and `Units` (so the Rust variants are e.g.
+`HeaderLayout::DayDate` and `WeatherLayout::OnePlusFour`, with just
+`#[serde(rename_all = "kebab-case")]` on each enum — no per-variant
+renames).
 
-Skip if you'd rather keep distribution as "git clone + cargo or
-docker-compose build" — that path stays clean and is what the README
-already documents. Adding the pipeline is mostly worthwhile if you
-expect non-Rust users to try the project; for a Rust-savvy audience
-it's friction without much payoff.
+## Conventions
+
+These apply to all multi-day rendering and were chosen during design
+review:
+
+- **Max temperature on top, min below** — matches iOS Weather,
+  AccuWeather, weather.com daily rows.
+- **3-letter weekday labels** (`Mon`/`Tue`/.../`Sun`) — single-letter
+  labels are ambiguous (`T`/`T`, `S`/`S`).
+- **min and max on separate lines**, not as a `6/14°` range.
+- **Weather glyph mapping unchanged** — new code reuses the existing
+  `wmo_icon()` codepoints and the bundled
+  `LiberationSans-Bold.ttf` / `WeatherIcons-Regular.ttf`.
+- **All sizes derived from `text_px`** (the existing
+  `max(min(w,h) × 0.05, 12.0)` rule) so layouts scale on smaller
+  displays. The pixel values below are the E1004 instantiation
+  (`text_px = 60`); implementation should express them as ratios.
+
+## Header sections (`header_layout`)
+
+All lines: LiberationSans-Bold at `text_px` (60 px on E1004),
+left-aligned, with `line_gap` (12 px) between them.
+
+| Value     | Lines rendered          | Nominal section height (E1004) |
+|-----------|--------------------------|--------------------------------|
+| `none`    | —                        | 0                              |
+| `day`     | `Tuesday`                | 60                             |
+| `date`    | `5 May 2026`             | 60                             |
+| `day-date` | `Tuesday` / `5 May 2026` | 132                            |
+
+Section width = widest line's rendered width.
+
+## Weather sections (`weather_layout`)
+
+### `none`
+Nothing rendered. Skip the weather fetch entirely.
+
+### `one` (default)
+Single line: weather icon at `1.3 × text_px` (78 px) plus
+`icon_gap` (18 px) plus `min–max°C` text at `text_px` (60 px),
+sharing a baseline. Falls back to "Weather error" text on fetch
+failure (existing behaviour).
+
+### `one-plus-four`
+The `one` weather line on top, then a 16 px gap, then a row of
+4 compact day-cells covering the next 4 days.
+
+Each cell, contents centred and stacked top-to-bottom:
+
+| Element  | Font size (E1004) | Font                  |
+|----------|-------------------|------------------------|
+| weekday  | 44 px             | LiberationSans-Bold    |
+| icon     | 56 px             | WeatherIcons-Regular   |
+| max      | 32 px             | LiberationSans-Bold    |
+| min      | 32 px             | LiberationSans-Bold    |
+
+Internal vertical gaps inside a cell: 8 px after weekday, 6 px after
+icon, 4 px after max. Nominal cell size: **96 × 182 px**. Cells in the
+row: 4 × 96 with 12 px gaps → row content **420 px wide**.
+
+### `five`
+A single row of 5 compact day-cells starting with today; no special
+today treatment.
+
+Each cell, stacked:
+
+| Element  | Font size (E1004) | Font                  |
+|----------|-------------------|------------------------|
+| weekday  | 36 px             | LiberationSans-Bold    |
+| icon     | 48 px             | WeatherIcons-Regular   |
+| max      | 28 px             | LiberationSans-Bold    |
+| min      | 28 px             | LiberationSans-Bold    |
+
+Internal vertical gaps: 8 / 6 / 4 px (same pattern as `one-plus-four`).
+Nominal cell size: **80 × 158 px**. Row: 5 × 80 with 10 px gaps →
+row content **440 px wide**.
+
+## Box composition
+
+The infobox is a vertical stack of (at most) two sections, in order:
+
+1. Header section (omitted if `header_layout = none`)
+2. Weather section (omitted if `weather_layout = none`)
+
+Vertical gap between sections (when both present): `line_gap` (12 px).
+Internal padding around the stack: `internal_pad` (36 px) on all sides.
+Background and rounded corners as today (`radius = text_px × 0.6`).
+
+Box dimensions:
+- Width  = max(section widths) + 2 × `internal_pad`
+- Height = Σ(section heights) + (n − 1) × `line_gap` + 2 × `internal_pad`
+
+The box is anchored via the existing `Position` mechanism (any corner /
+edge / centre).
+
+## Default reproduces current behaviour
+
+`header_layout = day-date` + `weather_layout = one`: header gives the
+two `Tuesday` / `5 May 2026` lines, weather gives the icon + range
+line, separated by `line_gap`. This is structurally what
+`infobox::render` does today. Implementation must verify rendered
+output is pixel-identical to the current code for the default config.
+
+## Implementation sketch
+
+1. **Config** (`src/config.rs`)
+   - Add `weather_layout: WeatherLayout` and `header_layout:
+     HeaderLayout` to `InfoboxConfig`, both `#[serde(default)]`.
+   - `WeatherLayout`: `None | One | OnePlusFour | Five`,
+     `#[serde(rename_all = "kebab-case")]` → TOML
+     `none | one | one-plus-four | five`.
+   - `HeaderLayout`: `None | Date | Day | DayDate`, same renaming →
+     `none | date | day | day-date`.
+
+2. **Weather fetch** (`src/weather.rs`)
+   - Generalise `daily()` to fetch N days; Open-Meteo supports
+     `forecast_days=N` with the same response shape (longer arrays).
+   - Return type becomes `Vec<DailyWeather>` (or wrapped).
+   - N is 0 / 1 / 5 depending on `weather_layout`.
+
+3. **Rendering** (`src/infobox.rs`)
+   - Restructure `render()` around the section-stack model: compute
+     each section's content + bounding box, stack vertically, derive
+     overall box dimensions, anchor via `Position`.
+   - Helpers shared between layouts: `compact_cell(...)` (the stacked
+     `weekday / icon / max / min` block, parameterised on font sizes
+     so `one-plus-four` and `five` both use it), `header_lines(...)`,
+     `today_weather_line(...)`.
+
+4. **Tests** — render-without-panic for the combinations users will
+   actually hit, plus a visual diff against current output for the
+   default:
+   - default (`day-date` + `one`) — diff against existing rendering
+   - `day-date` + `one-plus-four`
+   - `day-date` + `five`
+   - `none` + `one` (weather only)
+   - `day-date` + `none` (header only, no weather fetch)
+   - error path: weather fetch fails for `one-plus-four` / `five`.
+
+## Open questions
+
+- **SVG rendering library** (raised on review): **Resolved** — going
+  with `taffy` as a layout engine plus an in-project `Drawable`
+  context enum for primitives (see *Phase 1 → Layout: taffy + a
+  Drawable context enum*). Reasoning, summarised:
+  - The pain is *layout* (manual x/y math), not rasterization;
+    `resvg`/`usvg` are rasterizers, and SVG's positioning model is
+    itself absolute — wouldn't reduce the math we have to do.
+  - Investigated alternatives: **decal** (declarative scene → SVG/PNG)
+    has the right shape but is too immature for production
+    (4 GitHub stars, first released Feb 2026 — single author, ~10
+    weeks of releases). **morphorm** is a credible second-place to
+    taffy if we ever want a different layout model. **slint-ui** is
+    the wrong tool — interactive UI runtime, overkill for headless
+    one-shot composition. **cascada** is even younger than decal.
+  - **Taffy** is mature (3.1k stars, used by Bevy / Servo / Zed /
+    Lapce), layout-only, slots cleanly next to our existing
+    `tiny-skia` + `ab_glyph` code. The `Drawable` enum keeps
+    rendering primitives small and local, with `measure` + `draw`
+    methods so the taffy callbacks are one-liners.
+  - Reconsider decal/resvg if user-supplied overlay templates become
+    a feature.
+- **Precipitation probability** (e.g. `30%` under the icon) — most
+  common "next thing" weather apps add. Not in scope yet; flag if
+  there's vertical room in `five`'s cells.
+- **Colour coding max/min** (red / blue) — available given Spectra 6,
+  but adds a config knob and may clash with photos. Not adopting now.
+- **Icon legibility at smaller sizes** — `wmo_icon()` glyphs are used
+  at 56 / 48 px in the new compact cells (vs. 78 px in the current
+  today line). Sanity-check after first implementation that they
+  read at those sizes.
+- **E1002 with the multi-day layouts** — config doesn't restrict
+  layouts by display size. With `text_px = 24` on E1002 the boxes
+  would be much smaller and likely unreadable. Document the
+  recommendation, or add a runtime warning, or both.
+
+---
+
+# Sequencing
+
+Total: 11 commits across 4 stages, each step independently shippable.
+Each step ends with the build green and existing tests passing.
+Behaviour changes are explicit in the step description; pure refactors
+are called out.
+
+(Stage groupings are sequencing-only; the design *Phase 1* / *Phase 2*
+sections above describe the eventual architecture, not the order of
+arrival.)
+
+## Stage 1 — Pixmap pipeline (1 commit)
+
+### Step 1 — Pixmap as canonical pipeline format
+
+**Files:** request handler in `src/main.rs`, `src/background.rs`,
+`src/infobox.rs`, `src/battery_indicator.rs`, `src/dither.rs`, new
+`PixmapReader` adapter.
+
+**Changes:**
+- Allocate one `tiny_skia::Pixmap` per request at screen
+  `(width, height)`.
+- `background.rs` paints the background colour and the resized photo
+  directly onto the Pixmap (eliminating the intermediate `RgbImage`).
+- `battery_indicator::apply` and `infobox::apply` change signature
+  from `&mut RgbImage` → `&mut Pixmap`. Most of their bodies already
+  use Pixmap internally; the `rgb_to_pixmap` / `pixmap_to_rgb`
+  round-trips inside `infobox.rs` are deleted.
+- Implement a thin `PixmapReader<'a>` wrapping `&'a Pixmap` with
+  `epd-dither`'s `ImageSize + ImageReader`. Dither reads pixels
+  straight from the Pixmap (alpha=255 throughout, so straight RGB).
+- Existing overlay render tests adapted to the new buffer type.
+- Update `project_state.md` memory: canonical pipeline format is now
+  `Pixmap`.
+
+**Acceptance:** Output of the dither pipeline is byte-identical (or
+near-identical with documented rounding tolerances) to before this
+commit. `cargo test` clean.
+
+## Stage 2 — Overlay abstraction (2 commits)
+
+### Step 2 — Overlay trait definitions
+
+**Files:** new module (e.g. `src/overlays/traits.rs`), `Cargo.toml`
+(add `async_trait`).
+
+**Changes:**
+- Define `Overlay`, `ReadyOverlay`, `OverlayContext` per the trait
+  sketch in Phase 1.
+- `ReadyOverlay::render` takes `&mut tiny_skia::Pixmap`.
+- Pick async-trait approach: `async_trait` macro vs native
+  async-fn-in-trait + `Pin<Box<...>>`. Recommend `async_trait` for
+  readability; deferred to Phase 1 open questions otherwise.
+- No callers yet — pure addition.
+
+**Acceptance:** `cargo build` and `cargo test` clean. No behaviour
+change.
+
+### Step 3 — Convert overlays to `Overlay` impls + parallel preprocess
+
+**Files:** `src/battery_indicator.rs`, `src/infobox.rs`, `src/main.rs`,
+`src/weather.rs`.
+
+**Changes:**
+- `BatteryIndicator` and `Infobox` implement `Overlay`. Existing
+  `apply()` bodies move into `ReadyOverlay::render`.
+- Each overlay struct captures its screen-derived config (timezone,
+  position, lat/lon, thresholds) at construction.
+- Weather fetch moves from inside `Infobox::render` to
+  `Infobox::preprocess`. Failed fetch yields a `ReadyOverlay` that
+  renders the existing "Weather error" message (preserves current
+  behaviour).
+- Screen builds `Vec<Box<dyn Overlay>>` once at startup from whichever
+  named config sections are present.
+- Request handler runs `tokio::join!` (or `try_join_all`) on overlay
+  preprocesses **in parallel with** photo retrieval. After both
+  complete: render overlays in list order onto the Pixmap, then
+  dither.
+- Render bodies still use the current ad-hoc tiny-skia code (the
+  taffy refactor lands in Stage 3).
+
+**Acceptance:** Default config renders pixel-identical output to
+before this commit (snapshot test from Stage 1 still passes).
+`cargo test` clean. Server-side log timing shows weather fetch
+overlapped with photo retrieval.
+
+## Stage 3 — Taffy migration (2 commits)
+
+### Step 4 — taffy + `Drawable` scaffolding
+
+**Files:** new module (e.g. `src/overlays/draw.rs`), `Cargo.toml`
+(add `taffy`).
+
+**Changes:**
+- Add the `Drawable` enum (`Text` / `Icon` / `Background`) with
+  `impl Drawable { fn measure(&self) -> taffy::Size<f32>; fn
+  draw(&self, canvas: &mut Pixmap, x, y, w, h); }`.
+- Methods delegate to the existing `draw_text` / `draw_glyph` /
+  `paint_rounded_rect` helpers in `src/overlay.rs`.
+- Add `walk(&tree, root, ox, oy, &mut visit)` helper for a depth-first
+  visitor that calls a closure on every node with context (parent
+  before children, so backgrounds end up underneath).
+- No callers yet.
+
+**Acceptance:** `cargo build` clean. Helpers have unit tests that
+build a tiny tree, compute layout, and verify the walker visits in
+the right order with correct accumulated coordinates.
+
+### Step 5 — Refactor `Infobox::render` onto taffy + `Drawable` (pure refactor)
+
+**Files:** `src/infobox.rs`.
+
+**Changes:**
+- Replace the current monolithic `render` with: build a small taffy
+  tree of `Drawable`-bearing nodes (rounded `Background` on the
+  root, `Text` / `Icon` leaves for the day name, date, and
+  icon-with-temps line), call `compute_layout_with_measure` with
+  `Drawable::measure`, then `walk` and paint with `Drawable::draw`.
+- Behaviour unchanged — current single-day layout, same fonts, same
+  positions.
+- Add a snapshot/golden render test against the existing output as
+  part of this commit, so subsequent steps can detect any drift.
+
+**Acceptance:** Pixel-identical render for the current behaviour (the
+new snapshot test passes).
+
+## Stage 4 — Multi-day layouts (6 commits)
+
+### Step 6 — Add `HeaderLayout` + `WeatherLayout` config (no behaviour change)
+
+**Files:** `src/config.rs`, `src/infobox.rs` (constructor only).
+
+**Changes:**
+- Add `HeaderLayout` (`None | Date | Day | DayDate`) and
+  `WeatherLayout` (`None | One | OnePlusFour | Five`) enums with
+  `#[serde(rename_all = "kebab-case")]` and `Default` impls.
+- Add fields to `InfoboxConfig` with `#[serde(default)]`.
+- Plumb into `Infobox` overlay constructor; constructor stores them
+  but rendering still ignores them.
+
+**Acceptance:** `cargo build` clean. Default config and an explicit
+`header_layout = "day-date"` / `weather_layout = "one"` both render
+identically to before.
+
+### Step 7 — Wire layout fields for all single-day combinations
+
+**Files:** `src/infobox.rs`.
+
+**Changes:**
+- Honour `header_layout` and `weather_layout` for the variants that
+  don't need multi-day data: `None | Date | Day | DayDate` × `None |
+  One`. The tree-builder selects which sections to add based on the
+  config.
+- `weather_layout = none` skips the weather fetch in
+  `Infobox::preprocess` (no Open-Meteo call when not needed).
+- The all-`none` case skips the box draw entirely (no Pixmap writes).
+
+**Acceptance:** Render-without-panic tests for each new combination.
+Header-only and weather-only render correctly; `none + none` is a
+no-op overlay.
+
+### Step 8 — Generalise weather fetch + add `compact_cell` tree-builder
+
+**Files:** `src/weather.rs`, `src/infobox.rs` (or new helper module).
+
+**Changes:**
+- Rename `weather::daily()` → `weather::forecast(days)` returning
+  `Vec<DailyWeather>`. Update `Infobox::preprocess` to call with N
+  derived from `weather_layout` (1 for `One`, 5 for `OnePlusFour`
+  and `Five`).
+- Add `compact_cell(tree, weekday, icon, max, min, font_sizes) ->
+  NodeId` — a taffy tree-builder that constructs the stacked
+  `weekday / icon / max / min` block and returns the parent node.
+  No layout uses it yet.
+- Helper has its own unit test (builds the cell, computes layout,
+  asserts bounding box).
+
+**Acceptance:** Existing single-day infobox behaviour unchanged
+(snapshot test still passes); helper test passes.
+
+### Step 9 — Implement `weather_layout = one-plus-four`
+
+**Files:** `src/infobox.rs`.
+
+**Changes:**
+- Add the today-line + 4-cell-row rendering using `compact_cell`,
+  per the Phase 2 specs.
+- Render tests for the layout (success and weather-error paths).
+
+**Acceptance:** New layout renders; tests pass; manual visual check
+on E1004 matches the mockup.
+
+### Step 10 — Implement `weather_layout = five`
+
+**Files:** `src/infobox.rs`.
+
+**Changes:**
+- Add the 5-cell-row rendering using `compact_cell` with the smaller
+  font set, per the Phase 2 specs.
+- Render tests.
+
+**Acceptance:** New layout renders; tests pass; manual visual check
+on E1004 matches the mockup.
+
+### Step 11 — Documentation
+
+**Files:** `README.md`, `config.example.toml`.
+
+**Changes:**
+- README: brief description of the overlay model and the new infobox
+  layout options.
+- `config.example.toml`: examples for each layout combo a user is
+  likely to reach for, including a comment about which layouts suit
+  which display.
+
+**Acceptance:** N/A (docs only).
