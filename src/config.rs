@@ -1,10 +1,13 @@
 use chrono::Duration;
 use chrono_tz::Tz;
+use icu::datetime::DateTimeFormatter;
+use icu::datetime::fieldsets::{E, YMD};
 use icu::locale::Locale;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::str::FromStr;
+use std::sync::Arc;
 use tiny_skia::ColorU8;
 
 // ----- Top-level config -----------------------------------------------------
@@ -122,7 +125,7 @@ pub struct ScreenConfig {
     /// weekday cells. Defaults to `en-GB` — full English names with
     /// day-month-year ordering (e.g. `Saturday`, `2 May 2026`, `Sat`).
     #[serde(default = "default_locale", deserialize_with = "deserialize_locale")]
-    pub locale: Locale,
+    pub locale: LocaleFormatters,
     #[serde(default)]
     pub dither: DitherConfig,
     /// Sensors to forward to MQTT for this screen. Each entry maps to one or
@@ -191,17 +194,71 @@ where
         .map_err(|e| serde::de::Error::custom(format!("invalid IANA timezone `{name}`: {e}")))
 }
 
-fn default_locale() -> Locale {
-    "en-GB".parse().expect("en-GB is a valid BCP-47 locale tag")
+/// Pre-built icu4x date / weekday formatters for one screen's locale.
+/// Construction (and any locale-data lookup error) happens once at config
+/// load, so a typo in `locale = "..."` aborts startup rather than the first
+/// render request. Cheap to clone — the inner formatters are shared via Arc.
+#[derive(Clone)]
+pub struct LocaleFormatters(Arc<LocaleFormattersInner>);
+
+struct LocaleFormattersInner {
+    locale: Locale,
+    weekday_full: DateTimeFormatter<E>,
+    weekday_short: DateTimeFormatter<E>,
+    date_long: DateTimeFormatter<YMD>,
 }
 
-fn deserialize_locale<'de, D>(d: D) -> Result<Locale, D::Error>
+impl LocaleFormatters {
+    pub fn try_from_tag(name: &str) -> anyhow::Result<Self> {
+        let locale =
+            Locale::from_str(name).map_err(|e| anyhow::anyhow!("invalid locale `{name}`: {e}"))?;
+        let weekday_full = DateTimeFormatter::try_new(locale.clone().into(), E::long())
+            .map_err(|e| anyhow::anyhow!("locale `{name}` cannot format weekday names: {e}"))?;
+        let weekday_short =
+            DateTimeFormatter::try_new(locale.clone().into(), E::short()).map_err(|e| {
+                anyhow::anyhow!("locale `{name}` cannot format short weekday names: {e}")
+            })?;
+        let date_long = DateTimeFormatter::try_new(locale.clone().into(), YMD::long())
+            .map_err(|e| anyhow::anyhow!("locale `{name}` cannot format long dates: {e}"))?;
+        Ok(Self(Arc::new(LocaleFormattersInner {
+            locale,
+            weekday_full,
+            weekday_short,
+            date_long,
+        })))
+    }
+
+    pub fn weekday_full(&self) -> &DateTimeFormatter<E> {
+        &self.0.weekday_full
+    }
+
+    pub fn weekday_short(&self) -> &DateTimeFormatter<E> {
+        &self.0.weekday_short
+    }
+
+    pub fn date_long(&self) -> &DateTimeFormatter<YMD> {
+        &self.0.date_long
+    }
+}
+
+impl std::fmt::Debug for LocaleFormatters {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("LocaleFormatters")
+            .field(&self.0.locale)
+            .finish()
+    }
+}
+
+fn default_locale() -> LocaleFormatters {
+    LocaleFormatters::try_from_tag("en-GB").expect("en-GB is supported by icu4x")
+}
+
+fn deserialize_locale<'de, D>(d: D) -> Result<LocaleFormatters, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let name = String::deserialize(d)?;
-    Locale::from_str(&name)
-        .map_err(|e| serde::de::Error::custom(format!("invalid locale `{name}`: {e}")))
+    LocaleFormatters::try_from_tag(&name).map_err(serde::de::Error::custom)
 }
 
 impl Config {

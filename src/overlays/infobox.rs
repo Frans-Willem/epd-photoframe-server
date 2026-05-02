@@ -3,14 +3,13 @@ use chrono::{DateTime, Datelike};
 use chrono_tz::Tz;
 use icu::calendar::{Date, Iso};
 use icu::datetime::DateTimeFormatter;
-use icu::datetime::fieldsets::{E, YMD};
-use icu::locale::Locale;
+use icu::datetime::fieldsets::E;
 use taffy::prelude::*;
 use tiny_skia::Pixmap;
 
 use super::drawable::{self, GenericDrawable, TextSpan, paint};
 use super::{Overlay, OverlayContext, ReadyOverlay};
-use crate::config::{HeaderLayout, InfoboxConfig, Units, WeatherLayout};
+use crate::config::{HeaderLayout, InfoboxConfig, LocaleFormatters, Units, WeatherLayout};
 use crate::weather::{self, DailyWeather};
 
 /// Date / time / weather overlay. Captures its config at construction;
@@ -18,11 +17,11 @@ use crate::weather::{self, DailyWeather};
 /// current time from the [`OverlayContext`].
 pub struct Infobox {
     cfg: InfoboxConfig,
-    locale: Locale,
+    locale: LocaleFormatters,
 }
 
 impl Infobox {
-    pub fn new(cfg: InfoboxConfig, locale: Locale) -> Self {
+    pub fn new(cfg: InfoboxConfig, locale: LocaleFormatters) -> Self {
         Self { cfg, locale }
     }
 }
@@ -65,7 +64,7 @@ impl Overlay for Infobox {
 
 struct ReadyInfobox {
     cfg: InfoboxConfig,
-    locale: Locale,
+    locale: LocaleFormatters,
     now: DateTime<Tz>,
     /// One entry per day starting from "today" (index 0). Empty when
     /// the configured layout doesn't request weather, or when the
@@ -110,20 +109,15 @@ impl ReadyOverlay for ReadyInfobox {
         )
         .expect("attach background context");
 
-        // Locale-driven date / weekday formatters. The header uses the long
-        // forms; the multi-day cell row below uses the short form (which CLDR
-        // sizes per locale — `Sat`/`Sa`/`sam.`/`土` rather than a fixed 3 chars).
-        let weekday_full = DateTimeFormatter::try_new(self.locale.clone().into(), E::long())
-            .expect("locale supports long weekday names");
-        let weekday_short = DateTimeFormatter::try_new(self.locale.clone().into(), E::short())
-            .expect("locale supports short weekday names");
-        let date_long = DateTimeFormatter::try_new(self.locale.clone().into(), YMD::long())
-            .expect("locale supports long dates");
+        // Locale-driven date / weekday formatters were built (and validated)
+        // at config load. The header uses the long forms; the multi-day cell
+        // row below uses the short form, which CLDR sizes per locale —
+        // `Sat`/`Sa`/`sam.`/`土` rather than a fixed 3 chars.
         let now_iso = icu_date(&self.now);
 
         // Header: zero, one, or two text lines.
         if matches!(cfg.header_layout, HeaderLayout::Day | HeaderLayout::DayDate) {
-            let day_text = weekday_full.format(&now_iso).to_string();
+            let day_text = self.locale.weekday_full().format(&now_iso).to_string();
             let n = text_leaf(&mut tree, day_text, text_px, fg);
             tree.add_child(infobox, n).expect("attach day line");
         }
@@ -131,7 +125,7 @@ impl ReadyOverlay for ReadyInfobox {
             cfg.header_layout,
             HeaderLayout::Date | HeaderLayout::DayDate
         ) {
-            let date_text = date_long.format(&now_iso).to_string();
+            let date_text = self.locale.date_long().format(&now_iso).to_string();
             let n = text_leaf(&mut tree, date_text, text_px, fg);
             tree.add_child(infobox, n).expect("attach date line");
         }
@@ -177,7 +171,7 @@ impl ReadyOverlay for ReadyInfobox {
                 (0..4).map(|i| self.weather.get(i + 1)),
                 fg,
                 cfg.units,
-                &weekday_short,
+                self.locale.weekday_short(),
             );
             tree.add_child(infobox, row).expect("attach 4-cell row");
         }
@@ -190,7 +184,7 @@ impl ReadyOverlay for ReadyInfobox {
                 (0..5).map(|i| self.weather.get(i)),
                 fg,
                 cfg.units,
-                &weekday_short,
+                self.locale.weekday_short(),
             );
             tree.add_child(infobox, row).expect("attach 5-cell row");
         }
@@ -469,7 +463,7 @@ mod tests {
                 weather_layout,
                 ..cfg()
             },
-            locale: "en-GB".parse().unwrap(),
+            locale: LocaleFormatters::try_from_tag("en-GB").unwrap(),
             now: UTC.with_ymd_and_hms(2026, 4, 20, 12, 0, 0).unwrap(),
             weather,
         }
