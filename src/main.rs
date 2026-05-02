@@ -46,9 +46,16 @@ struct Screen {
     overlays: Vec<Box<dyn Overlay>>,
 }
 
-#[derive(Clone)]
+/// Shared application state. Wrapped in an `Arc` once at construction
+/// (`Arc::new(AppState { … })`) and that `Arc<AppState>` is what's
+/// passed to `Router::with_state` — Axum's per-request state extractor
+/// then clones the outer `Arc` (one refcount bump) instead of every
+/// inner field needing its own `Clone`. Each `Screen` is itself
+/// `Arc<Screen>` so a request handler can hand a single owned
+/// reference to a `spawn_blocking` task without cloning the screen's
+/// fields.
 struct AppState {
-    screens: Arc<HashMap<String, Screen>>,
+    screens: HashMap<String, Arc<Screen>>,
     http: Client,
     mqtt: Option<Publisher>,
 }
@@ -129,7 +136,7 @@ async fn main() -> anyhow::Result<()> {
         Publisher::connect(m, &config.screens)
     });
 
-    let screens: HashMap<String, Screen> = config
+    let screens: HashMap<String, Arc<Screen>> = config
         .screens
         .into_iter()
         .map(|s| {
@@ -153,17 +160,17 @@ async fn main() -> anyhow::Result<()> {
                 overlays,
                 config: s,
             };
-            Ok::<_, anyhow::Error>((screen.config.name.clone(), screen))
+            Ok::<_, anyhow::Error>((screen.config.name.clone(), Arc::new(screen)))
         })
         .collect::<anyhow::Result<_>>()?;
 
-    let state = AppState {
-        screens: Arc::new(screens),
+    let state = Arc::new(AppState {
+        screens,
         http: Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()?,
         mqtt,
-    };
+    });
 
     let app = Router::new()
         .route("/screen/{name}", get(screen_handler))
@@ -180,7 +187,7 @@ async fn screen_handler(
     Path(name): Path<String>,
     Query(q): Query<ScreenQuery>,
     OriginalUri(uri): OriginalUri,
-    State(state): State<AppState>,
+    State(state): State<Arc<AppState>>,
 ) -> Response {
     let Some(screen) = state.screens.get(&name) else {
         return (StatusCode::NOT_FOUND, format!("screen `{name}` not found")).into_response();
@@ -299,9 +306,10 @@ async fn screen_handler(
     }
 
     let png = match tokio::task::spawn_blocking({
-        let dither_method = screen.dither_method.clone();
+        let screen = Arc::clone(screen);
         move || {
-            dither_method
+            screen
+                .dither_method
                 .run(img)
                 .and_then(|p| p.to_png().map_err(anyhow::Error::from))
         }

@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use anyhow::anyhow;
 use epd_dither::dither::DynDitherer;
 use epd_dither::dither::image_traits::{ImageCombinedRW, ImageReader, ImageSize};
@@ -16,35 +14,20 @@ use crate::config::DitherConfig;
 /// so premultiplied storage equals straight RGB and we read channel
 /// bytes directly. Owns its `Pixmap` so the type is `'static`,
 /// satisfying `DynDitherer<T>`'s `T: 'static` bound.
-struct PixmapReader {
-    pixmap: Pixmap,
-    width: usize,
-    height: usize,
-}
-
-impl PixmapReader {
-    fn new(pixmap: Pixmap) -> Self {
-        let (width, height) = (pixmap.width() as usize, pixmap.height() as usize);
-        Self {
-            pixmap,
-            width,
-            height,
-        }
-    }
-}
+struct PixmapReader(Pixmap);
 
 impl ImageSize for PixmapReader {
     fn width(&self) -> usize {
-        self.width
+        self.0.width() as usize
     }
     fn height(&self) -> usize {
-        self.height
+        self.0.height() as usize
     }
 }
 
 impl ImageReader<Rgb<u8>> for PixmapReader {
     fn get_pixel(&self, x: usize, y: usize) -> Rgb<u8> {
-        let p = self.pixmap.pixels()[y * self.width + x];
+        let p = self.0.pixels()[y * self.width() + x];
         Rgb([p.red(), p.green(), p.blue()])
     }
 }
@@ -61,12 +44,9 @@ type DitherInOut = ImageCombinedRW<PixmapReader, PaletteImage>;
 /// `prepare` so misconfiguration surfaces at startup. Run-time errors are
 /// still propagated as `Result` rather than panicking — boot validation
 /// catches them early but isn't a substitute for runtime error handling.
-///
-/// Cheap to clone — it's an `Arc` under the hood.
-#[derive(Clone)]
 pub struct PreparedDitherMethod {
     output_palette: VerifiedPalette,
-    ditherer: Arc<dyn DynDitherer<DitherInOut> + Send + Sync>,
+    ditherer: Box<dyn DynDitherer<DitherInOut> + Send + Sync>,
 }
 
 impl PreparedDitherMethod {
@@ -92,7 +72,7 @@ impl PreparedDitherMethod {
 
         Ok(Self {
             output_palette,
-            ditherer: Arc::from(ditherer),
+            ditherer,
         })
     }
 
@@ -103,7 +83,7 @@ impl PreparedDitherMethod {
     pub fn run(&self, pixmap: Pixmap) -> anyhow::Result<PaletteImage> {
         let writer =
             PaletteImage::new(pixmap.width(), pixmap.height(), self.output_palette.clone());
-        let reader = PixmapReader::new(pixmap);
+        let reader = PixmapReader(pixmap);
         // Reader and writer are built from the same source `Pixmap`'s
         // dimensions, so `ImageCombinedRW::new` (which returns `None` on
         // mismatch) cannot fail here.
