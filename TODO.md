@@ -1,18 +1,5 @@
 # TODO
 
-## Documentation
-
-### Regenerate Spectra 6 example images
-The README's E1002 and E1004 example images
-(`examples/e1002-landscape.png`, `examples/living-room.png`) were
-generated with `epdoptimize` instead of the calibrated Spectra 6
-pipeline this server actually ships, so the visible dither pattern
-and colour reproduction don't match what users will see on real
-hardware. Re-render them via the actual server (or the `epd-dither`
-CLI with this project's dither config) on the same source photos.
-The E1001 4-level grayscale example (`examples/e1001-landscape.png`)
-predates the issue and is fine.
-
 ## Licensing
 
 ### Asset attribution
