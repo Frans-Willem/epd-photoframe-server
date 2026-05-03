@@ -1,5 +1,6 @@
 use chrono::Duration;
 use chrono_tz::Tz;
+use icu_calendar::{Date, Iso};
 use icu_datetime::DateTimeFormatter;
 use icu_datetime::fieldsets::{E, YMD};
 use icu_locale_core::Locale;
@@ -201,29 +202,46 @@ where
 #[derive(Clone)]
 pub struct LocaleFormatters {
     locale: Locale,
-    pub weekday_full: DateTimeFormatter<E>,
-    pub weekday_short: DateTimeFormatter<E>,
-    pub date_long: DateTimeFormatter<YMD>,
+    weekday_full_fmt: DateTimeFormatter<E>,
+    weekday_short_fmt: DateTimeFormatter<E>,
+    date_long_fmt: DateTimeFormatter<YMD>,
 }
 
 impl LocaleFormatters {
     pub fn try_from_tag(name: &str) -> anyhow::Result<Self> {
         let locale =
             Locale::from_str(name).map_err(|e| anyhow::anyhow!("invalid locale `{name}`: {e}"))?;
-        let weekday_full = DateTimeFormatter::try_new(locale.clone().into(), E::long())
+        let weekday_full_fmt = DateTimeFormatter::try_new(locale.clone().into(), E::long())
             .map_err(|e| anyhow::anyhow!("locale `{name}` cannot format weekday names: {e}"))?;
-        let weekday_short =
-            DateTimeFormatter::try_new(locale.clone().into(), E::short()).map_err(|e| {
+        let weekday_short_fmt = DateTimeFormatter::try_new(locale.clone().into(), E::short())
+            .map_err(|e| {
                 anyhow::anyhow!("locale `{name}` cannot format short weekday names: {e}")
             })?;
-        let date_long = DateTimeFormatter::try_new(locale.clone().into(), YMD::long())
+        let date_long_fmt = DateTimeFormatter::try_new(locale.clone().into(), YMD::long())
             .map_err(|e| anyhow::anyhow!("locale `{name}` cannot format long dates: {e}"))?;
         Ok(Self {
             locale,
-            weekday_full,
-            weekday_short,
-            date_long,
+            weekday_full_fmt,
+            weekday_short_fmt,
+            date_long_fmt,
         })
+    }
+
+    /// Locale-appropriate full weekday name, e.g. `Saturday` / `samedi` / `zaterdag`.
+    pub fn weekday_full(&self, date: &Date<Iso>) -> String {
+        self.weekday_full_fmt.format(date).to_string()
+    }
+
+    /// Locale-appropriate short weekday name. CLDR sizes this per locale —
+    /// `Sat` / `Sa` / `sam.` / `土` rather than a fixed 3 chars.
+    pub fn weekday_short(&self, date: &Date<Iso>) -> String {
+        self.weekday_short_fmt.format(date).to_string()
+    }
+
+    /// Locale-appropriate long-form date, e.g. `2 May 2026` / `May 2, 2026` /
+    /// `2 mei 2026` / `2026年5月2日`.
+    pub fn date_long(&self, date: &Date<Iso>) -> String {
+        self.date_long_fmt.format(date).to_string()
     }
 }
 

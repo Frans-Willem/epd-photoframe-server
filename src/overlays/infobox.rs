@@ -2,8 +2,6 @@ use async_trait::async_trait;
 use chrono::{DateTime, Datelike};
 use chrono_tz::Tz;
 use icu_calendar::{Date, Iso};
-use icu_datetime::DateTimeFormatter;
-use icu_datetime::fieldsets::E;
 use taffy::prelude::*;
 use tiny_skia::Pixmap;
 
@@ -109,14 +107,11 @@ impl ReadyOverlay for ReadyInfobox {
         )
         .expect("attach background context");
 
-        // Locale-driven date / weekday formatters were built (and validated)
-        // at config load. The header uses the long forms; the multi-day cell
-        // row below uses the short form, which CLDR sizes per locale —
-        // `Sat`/`Sa`/`sam.`/`土` rather than a fixed 3 chars. icu's calendar
-        // accepts the same year/month/day range as `chrono::DateTime<Tz>`, so
-        // the conversion below is infallible in practice — but we don't want
-        // a runtime panic if that ever changes; substitute `?` instead.
-        let now_iso = match Date::try_new_iso(
+        // icu's calendar accepts the same year/month/day range as
+        // `chrono::DateTime<Tz>`, so the conversion below is infallible in
+        // practice — but we don't want a runtime panic if that ever changes;
+        // substitute `?` for the affected strings instead.
+        let current_date_icu = match Date::try_new_iso(
             self.now.year(),
             self.now.month() as u8,
             self.now.day() as u8,
@@ -127,14 +122,13 @@ impl ReadyOverlay for ReadyInfobox {
                 None
             }
         };
-        let placeholder_text = || "?".to_string();
 
         // Header: zero, one, or two text lines.
         if matches!(cfg.header_layout, HeaderLayout::Day | HeaderLayout::DayDate) {
-            let day_text = now_iso
+            let day_text = current_date_icu
                 .as_ref()
-                .map(|d| self.locale.weekday_full.format(d).to_string())
-                .unwrap_or_else(placeholder_text);
+                .map(|d| self.locale.weekday_full(d))
+                .unwrap_or("?".to_string());
             let n = text_leaf(&mut tree, day_text, text_px, fg);
             tree.add_child(infobox, n).expect("attach day line");
         }
@@ -142,10 +136,10 @@ impl ReadyOverlay for ReadyInfobox {
             cfg.header_layout,
             HeaderLayout::Date | HeaderLayout::DayDate
         ) {
-            let date_text = now_iso
+            let date_text = current_date_icu
                 .as_ref()
-                .map(|d| self.locale.date_long.format(d).to_string())
-                .unwrap_or_else(placeholder_text);
+                .map(|d| self.locale.date_long(d))
+                .unwrap_or("?".to_string());
             let n = text_leaf(&mut tree, date_text, text_px, fg);
             tree.add_child(infobox, n).expect("attach date line");
         }
@@ -184,17 +178,17 @@ impl ReadyOverlay for ReadyInfobox {
         }
 
         if cfg.weather_layout == WeatherLayout::OnePlusFour {
-            let start = now_iso
+            let tomorrow = current_date_icu
                 .as_ref()
                 .map(|d| Date::from_rata_die(d.to_rata_die() + 1, Iso));
             let row = compact_cell_row(
                 &mut tree,
                 &CellStyle::one_plus_four(text_px),
-                start,
+                tomorrow,
                 (0..4).map(|i| self.weather.get(i + 1)),
                 fg,
                 cfg.units,
-                &self.locale.weekday_short,
+                &self.locale,
             );
             tree.add_child(infobox, row).expect("attach 4-cell row");
         }
@@ -203,11 +197,11 @@ impl ReadyOverlay for ReadyInfobox {
             let row = compact_cell_row(
                 &mut tree,
                 &CellStyle::five(text_px),
-                now_iso,
+                current_date_icu,
                 (0..5).map(|i| self.weather.get(i)),
                 fg,
                 cfg.units,
-                &self.locale.weekday_short,
+                &self.locale,
             );
             tree.add_child(infobox, row).expect("attach 5-cell row");
         }
@@ -365,7 +359,7 @@ fn compact_cell_row<'a>(
     weather: impl Iterator<Item = Option<&'a DailyWeather>>,
     color: crate::config::ColorConfig,
     units: Units,
-    weekday_fmt: &DateTimeFormatter<E>,
+    locale: &LocaleFormatters,
 ) -> NodeId {
     let placeholder_temp = format!("—{}", units.temperature_suffix());
     let cells: Vec<NodeId> = weather
@@ -375,9 +369,9 @@ fn compact_cell_row<'a>(
                 .as_ref()
                 .map(|d| {
                     let date = Date::from_rata_die(d.to_rata_die() + i as i64, Iso);
-                    weekday_fmt.format(&date).to_string()
+                    locale.weekday_short(&date)
                 })
-                .unwrap_or_else(|| "?".to_string());
+                .unwrap_or("?".to_string());
             let fmt_temp = |t: f32| format!("{:.0}{}", t.round(), units.temperature_suffix());
             let max_temp =
                 w.map_or_else(|| placeholder_temp.clone(), |w| fmt_temp(w.temperature_max));
