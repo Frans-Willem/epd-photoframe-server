@@ -216,9 +216,8 @@ Google's HTML layout — if it breaks, please file an issue.
 
 ## License
 
-Source code is licensed under the GNU Affero General Public License,
-version 3 or any later version (`AGPL-3.0-or-later`). Full text in
-[LICENSE](./LICENSE).
+Source code is licensed under version 3 of the GNU Affero General
+Public License (`AGPL-3.0-only`). Full text in [LICENSE](./LICENSE).
 
 Bundled third-party assets in `assets/` carry their own licences (SIL
 OFL 1.1 for the fonts) — see [NOTICE](./NOTICE) and the per-asset
