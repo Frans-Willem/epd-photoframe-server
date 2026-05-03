@@ -214,6 +214,15 @@ bug reports, and pull requests are welcome on the GitHub issue tracker.
 The Google Photos share-page scraping in particular is at the mercy of
 Google's HTML layout — if it breaks, please file an issue.
 
+## License
+
+Source code is licensed under version 3 of the GNU Affero General
+Public License (`AGPL-3.0-only`). Full text in [LICENSE](./LICENSE).
+
+Bundled third-party assets in `assets/` carry their own licences (SIL
+OFL 1.1 for the fonts) — see [NOTICE](./NOTICE) and the per-asset
+files in [LICENSES/](./LICENSES) for details.
+
 ## A note on LLM use
 
 I made heavy use of Claude while building this. I was closely involved
