@@ -1,0 +1,27 @@
+epd-photoframe-server
+=====================
+
+This directory ships third-party assets in `assets/`. Each asset is
+licensed independently of the server source code. Per-asset license
+texts live in `LICENSES/` and are referenced below.
+
+
+assets/LiberationSans-Bold.ttf
+------------------------------
+Liberation Sans Bold, from the Liberation Fonts project.
+Copyright (c) 2010 Google Corporation (with Reserved Font Names Arimo,
+Tinos, and Cousine) and Copyright (c) 2012 Red Hat, Inc. (with Reserved
+Font Name Liberation).
+Licensed under the SIL Open Font License, Version 1.1.
+Upstream: https://github.com/liberationfonts/liberation-fonts
+License text: LICENSES/LiberationSans-Bold.ttf.txt
+
+
+assets/WeatherIcons-Regular.ttf
+-------------------------------
+Weather Icons. Icon designs by Lukas Bischoff
+(https://twitter.com/artill); v1.1+ artwork by Erik Flowers
+(https://helloerik.com).
+Licensed under the SIL Open Font License, Version 1.1.
+Upstream: https://github.com/erikflowers/weather-icons
+License text: LICENSES/WeatherIcons-Regular.ttf.txt
