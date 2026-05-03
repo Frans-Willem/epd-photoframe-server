@@ -1,12 +1,13 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Datelike};
 use chrono_tz::Tz;
+use icu_calendar::{Date, Iso};
 use taffy::prelude::*;
 use tiny_skia::Pixmap;
 
 use super::drawable::{self, GenericDrawable, TextSpan, paint};
 use super::{Overlay, OverlayContext, ReadyOverlay};
-use crate::config::{HeaderLayout, InfoboxConfig, Units, WeatherLayout};
+use crate::config::{HeaderLayout, InfoboxConfig, LocaleFormatters, Units, WeatherLayout};
 use crate::weather::{self, DailyWeather};
 
 /// Date / time / weather overlay. Captures its config at construction;
@@ -14,11 +15,12 @@ use crate::weather::{self, DailyWeather};
 /// current time from the [`OverlayContext`].
 pub struct Infobox {
     cfg: InfoboxConfig,
+    locale: LocaleFormatters,
 }
 
 impl Infobox {
-    pub fn new(cfg: InfoboxConfig) -> Self {
-        Self { cfg }
+    pub fn new(cfg: InfoboxConfig, locale: LocaleFormatters) -> Self {
+        Self { cfg, locale }
     }
 }
 
@@ -51,6 +53,7 @@ impl Overlay for Infobox {
         };
         Box::new(ReadyInfobox {
             cfg: self.cfg.clone(),
+            locale: self.locale.clone(),
             now: ctx.now,
             weather,
         })
@@ -59,6 +62,7 @@ impl Overlay for Infobox {
 
 struct ReadyInfobox {
     cfg: InfoboxConfig,
+    locale: LocaleFormatters,
     now: DateTime<Tz>,
     /// One entry per day starting from "today" (index 0). Empty when
     /// the configured layout doesn't request weather, or when the
@@ -103,9 +107,28 @@ impl ReadyOverlay for ReadyInfobox {
         )
         .expect("attach background context");
 
+        // icu's calendar accepts the same year/month/day range as
+        // `chrono::DateTime<Tz>`, so the conversion below is infallible in
+        // practice — but we don't want a runtime panic if that ever changes;
+        // substitute `?` for the affected strings instead.
+        let current_date_icu = match Date::try_new_iso(
+            self.now.year(),
+            self.now.month() as u8,
+            self.now.day() as u8,
+        ) {
+            Ok(d) => Some(d),
+            Err(e) => {
+                tracing::warn!(error = %e, "infobox: chrono date out of icu calendar range");
+                None
+            }
+        };
+
         // Header: zero, one, or two text lines.
         if matches!(cfg.header_layout, HeaderLayout::Day | HeaderLayout::DayDate) {
-            let day_text = self.now.format("%A").to_string();
+            let day_text = current_date_icu
+                .as_ref()
+                .map(|d| self.locale.weekday_full(d))
+                .unwrap_or("?".to_string());
             let n = text_leaf(&mut tree, day_text, text_px, fg);
             tree.add_child(infobox, n).expect("attach day line");
         }
@@ -113,12 +136,10 @@ impl ReadyOverlay for ReadyInfobox {
             cfg.header_layout,
             HeaderLayout::Date | HeaderLayout::DayDate
         ) {
-            let date_text = format!(
-                "{} {} {}",
-                self.now.day(),
-                MONTHS[self.now.month0() as usize],
-                self.now.year()
-            );
+            let date_text = current_date_icu
+                .as_ref()
+                .map(|d| self.locale.date_long(d))
+                .unwrap_or("?".to_string());
             let n = text_leaf(&mut tree, date_text, text_px, fg);
             tree.add_child(infobox, n).expect("attach date line");
         }
@@ -157,13 +178,17 @@ impl ReadyOverlay for ReadyInfobox {
         }
 
         if cfg.weather_layout == WeatherLayout::OnePlusFour {
+            let tomorrow = current_date_icu
+                .as_ref()
+                .map(|d| Date::from_rata_die(d.to_rata_die() + 1, Iso));
             let row = compact_cell_row(
                 &mut tree,
                 &CellStyle::one_plus_four(text_px),
-                self.now + chrono::Duration::days(1),
+                tomorrow,
                 (0..4).map(|i| self.weather.get(i + 1)),
                 fg,
                 cfg.units,
+                &self.locale,
             );
             tree.add_child(infobox, row).expect("attach 4-cell row");
         }
@@ -172,10 +197,11 @@ impl ReadyOverlay for ReadyInfobox {
             let row = compact_cell_row(
                 &mut tree,
                 &CellStyle::five(text_px),
-                self.now,
+                current_date_icu,
                 (0..5).map(|i| self.weather.get(i)),
                 fg,
                 cfg.units,
+                &self.locale,
             );
             tree.add_child(infobox, row).expect("attach 5-cell row");
         }
@@ -329,17 +355,23 @@ fn compact_cell(
 fn compact_cell_row<'a>(
     tree: &mut TaffyTree<GenericDrawable>,
     style: &CellStyle,
-    first_date: DateTime<Tz>,
+    first_date: Option<Date<Iso>>,
     weather: impl Iterator<Item = Option<&'a DailyWeather>>,
     color: crate::config::ColorConfig,
     units: Units,
+    locale: &LocaleFormatters,
 ) -> NodeId {
     let placeholder_temp = format!("—{}", units.temperature_suffix());
     let cells: Vec<NodeId> = weather
         .enumerate()
         .map(|(i, w)| {
-            let date = first_date + chrono::Duration::days(i as i64);
-            let weekday = date.format("%a").to_string();
+            let weekday = first_date
+                .as_ref()
+                .map(|d| {
+                    let date = Date::from_rata_die(d.to_rata_die() + i as i64, Iso);
+                    locale.weekday_short(&date)
+                })
+                .unwrap_or("?".to_string());
             let fmt_temp = |t: f32| format!("{:.0}{}", t.round(), units.temperature_suffix());
             let max_temp =
                 w.map_or_else(|| placeholder_temp.clone(), |w| fmt_temp(w.temperature_max));
@@ -377,21 +409,6 @@ fn compact_cell_row<'a>(
     )
     .expect("create cell row")
 }
-
-const MONTHS: [&str; 12] = [
-    "January",
-    "February",
-    "March",
-    "April",
-    "May",
-    "June",
-    "July",
-    "August",
-    "September",
-    "October",
-    "November",
-    "December",
-];
 
 /// Maps an Open-Meteo (WMO 4677) weather code to a Weather Icons glyph.
 /// Neutral (non-day/night) icons, since the infobox summarises the whole day.
@@ -461,6 +478,7 @@ mod tests {
                 weather_layout,
                 ..cfg()
             },
+            locale: LocaleFormatters::try_from_tag("en-GB").unwrap(),
             now: UTC.with_ymd_and_hms(2026, 4, 20, 12, 0, 0).unwrap(),
             weather,
         }

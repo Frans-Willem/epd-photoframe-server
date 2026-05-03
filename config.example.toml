@@ -42,6 +42,11 @@ background = "#FFFFFF"
 # IANA timezone name, used for rotation and the infobox clock. Defaults to
 # the system timezone.
 # timezone = "Europe/Amsterdam"
+# BCP-47 locale tag for the infobox. Controls the language of weekday and
+# month names AND the date pattern: "en-US" gives "May 2, 2026" / "Sat",
+# "en-GB" (default) gives "2 May 2026" / "Sat", "nl-NL" gives "2 mei 2026"
+# / "za", "de-DE" gives "2. Mai 2026" / "Sa".
+# locale = "nl-NL"
 # When the screen should reshuffle (new seed, cursor reset to the first
 # photo of the new shuffle). Pick ONE syntax — Quartz-style 7-field cron:
 #   sec min hour day-of-month month day-of-week [year]
@@ -89,10 +94,10 @@ foreground = "#000000"
 latitude = 52.37
 longitude = 4.90
 units = "metric"               # metric (°C, km/h) | imperial (°F, mph)
-# Header section above the weather:
+# Header section above the weather. Word and date format depend on `locale`:
 #   none      — no header
-#   day       — "Tuesday"
-#   date      — "5 May 2026"
+#   day       — full weekday name, e.g. "Tuesday"
+#   date      — locale-formatted date, e.g. "5 May 2026"
 #   day-date  — both lines, day on top  (default)
 header_layout = "day-date"
 # Weather section. The multi-day variants need a tall display to fit
