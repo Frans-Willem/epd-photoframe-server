@@ -1,8 +1,8 @@
 # cargo-about configuration. Run `cargo about generate -c
-# cargo-about/about.toml -o THIRD_PARTY_LICENSES.md cargo-about/about.hbs`
+# licensing/about.toml -o THIRD_PARTY_LICENSES.md licensing/about.hbs`
 # after a dep change to refresh the bundled attribution file.
 #
-# The accepted-licences list mirrors the allow list in `cargo-deny/deny.toml`.
+# The accepted-licences list mirrors the allow list in `licensing/deny.toml`.
 
 accepted = [
     "AGPL-3.0-only",

@@ -1,6 +1,6 @@
 # cargo-deny configuration for epd-photoframe-server.
 #
-# Run with `cargo deny check --config cargo-deny/deny.toml`. The licence
+# Run with `cargo deny check --config licensing/deny.toml`. The licence
 # check is the load-bearing one: this crate is AGPL-3.0-only, so every
 # transitive dependency must be under a licence that combines cleanly
 # with AGPL-3.0.
