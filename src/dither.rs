@@ -1,8 +1,8 @@
 use anyhow::anyhow;
 use epd_dither::dither::DynDitherer;
 use epd_dither::dither::image_traits::{ImageCombinedRW, ImageReader, ImageSize};
-use epd_dither::factory::decompose_ditherer;
-use epd_dither::palette_image::{PaletteImage, VerifiedPalette};
+use epd_dither::image::palette_image::{PaletteImage, VerifiedPalette};
+use epd_dither::registry::decompose_ditherer;
 use image::Rgb;
 use tiny_skia::Pixmap;
 
