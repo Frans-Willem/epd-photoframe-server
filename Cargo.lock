@@ -475,7 +475,7 @@ checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 [[package]]
 name = "epd-dither"
 version = "0.1.0"
-source = "git+https://github.com/Frans-Willem/epd-dither?rev=0e758d499e6c97cbec883e8f74a3a7ef921c5bca#0e758d499e6c97cbec883e8f74a3a7ef921c5bca"
+source = "git+https://github.com/Frans-Willem/epd-dither?rev=029f2827f6e74a52d88890b3383ba97878051bb1#029f2827f6e74a52d88890b3383ba97878051bb1"
 dependencies = [
  "image",
  "itertools",

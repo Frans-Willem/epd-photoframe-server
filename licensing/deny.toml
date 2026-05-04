@@ -7,12 +7,11 @@
 
 [licenses]
 # Permissive licences (MIT, Apache-2.0, BSD, ISC, etc.) all combine
-# with AGPL-3.0. GPL-3.0-or-later is explicitly compatible with
-# AGPL-3.0 via §13 of GPL-3.0 (covers the `epd-dither` git dep).
-# AGPL-3.0-only is here for this crate's own licence. Public-domain
-# dedications (CC0, Unlicense) and the data licences
-# (CDLA-Permissive-2.0 used by `webpki-roots`, Unicode-3.0 used by
-# icu4x) round out what's currently in the dep tree.
+# with AGPL-3.0. AGPL-3.0-only covers this crate's own licence and
+# the `epd-dither` git dep. Public-domain dedications (CC0, Unlicense)
+# and the data licences (CDLA-Permissive-2.0 used by `webpki-roots`,
+# Unicode-3.0 used by icu4x) round out what's currently in the dep
+# tree.
 #
 # `NCSA` covers `libfuzzer-sys` (transitive via image → ravif → rav1e);
 # the NCSA / "University of Illinois" licence is permissive (MIT-style)
@@ -26,7 +25,6 @@ allow = [
     "BSL-1.0",
     "CC0-1.0",
     "CDLA-Permissive-2.0",
-    "GPL-3.0-or-later",
     "ISC",
     "MIT",
     "NCSA",
